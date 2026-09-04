@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+
+# Local agent state / orchestration (never published)
+.memory/
+.loop/
+loop.config.json
+.claude/settings.local.json
