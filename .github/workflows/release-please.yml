@@ -25,6 +25,8 @@ jobs:
     # Publishing lives here rather than in a `release: published` workflow:
     # release-please creates the Release with GITHUB_TOKEN, and GitHub does not
     # trigger workflows from GITHUB_TOKEN-generated events.
+    # Needs a PyPI trusted publisher registered for workflow `release-please.yml`
+    # + environment `pypi` (publish.yml needs a second, separate entry).
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
