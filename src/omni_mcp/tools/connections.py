@@ -8,11 +8,12 @@ returns plaintext credentials, but this module never assumes that from upstream.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
+import httpx
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from omni_mcp.client import get_client
 from omni_mcp.errors import handle_api_error
@@ -43,12 +44,42 @@ Dialect = Literal[
 SortField = Literal["database", "dialect", "name"]
 SortDirection = Literal["asc", "desc"]
 
+#: Credential-bearing string fields must not be whitespace-stripped: unlike
+#: every other field on these models, leading/trailing whitespace in a
+#: password or private key may be significant (or, for a private key, part of
+#: its PEM structure). The model-level `str_strip_whitespace=True` config
+#: would otherwise silently mangle these values.
+CredentialStr = Annotated[str, StringConstraints(strip_whitespace=False)]
+
 #: Schema refresh schedules use a 6-field AWS EventBridge cron expression
 #: (`minute hour day-of-month month day-of-week year`) — confirmed by every
 #: example in the spec, e.g. `"00 09 * * ? *"`.
 _CRON_FIELD_COUNT = 6
 
 _SENSITIVE_SUBSTRINGS = ("password", "secret", "token", "key")
+
+#: `omni_create_connection`'s first-class request-body keys (camelCase, as
+#: sent to the API). A `settings` passthrough key colliding with one of these
+#: is rejected rather than silently overriding the dedicated parameter.
+_CREATE_CONNECTION_FIRST_CLASS_KEYS = frozenset(
+    {
+        "dialect",
+        "name",
+        "passwordUnencrypted",
+        "host",
+        "port",
+        "database",
+        "username",
+        "warehouse",
+        "baseRole",
+        "defaultSchema",
+        "includeSchemas",
+        "includeOtherCatalogs",
+        "queryTimeoutSeconds",
+        "region",
+        "privateKey",
+    }
+)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -317,12 +348,13 @@ class CreateConnectionInput(BaseModel):
 
     dialect: Dialect = Field(..., description="The database dialect.")
     name: str = Field(..., min_length=1, description="A descriptive name for the connection.")
-    password_unencrypted: str = Field(
+    password_unencrypted: CredentialStr = Field(
         ...,
         description=(
-            "The password to authenticate with. BigQuery: the full service account JSON file content. "
-            "Snowflake with keypair authentication: may be an empty string since `private_key` supplies "
-            "the credential instead."
+            "The password to authenticate with. Sent verbatim, without whitespace-stripping — leading/"
+            "trailing whitespace may be a meaningful part of the credential. BigQuery: the full service "
+            "account JSON file content. Snowflake with keypair authentication: may be an empty string "
+            "since `private_key` supplies the credential instead."
         ),
     )
     host: str | None = Field(
@@ -383,18 +415,22 @@ class CreateConnectionInput(BaseModel):
         default=None,
         description="Required for BigQuery and Athena connections. BigQuery: a region like `us`. Athena: an AWS region like `us-east-1`.",
     )
-    private_key: str | None = Field(
+    private_key: CredentialStr | None = Field(
         default=None,
         description=(
             "Applicable for Snowflake only. An RSA key for keypair authentication (PEM headers are added "
-            "automatically if none are provided)."
+            "automatically if none are provided). Sent verbatim, without whitespace-stripping, since PEM "
+            "formatting may depend on exact whitespace."
         ),
     )
     settings: dict[str, Any] | None = Field(
         default=None,
         description=(
             "Additional dialect-specific settings passed through verbatim as camelCase keys, merged into "
-            "the request body. Recognised keys (all optional): `maxBillingBytes` (str, BigQuery max billed "
+            "the request body *before* the first-class fields above (which always win on key collision). "
+            "Must not repeat a first-class field's API key (e.g. `passwordUnencrypted`, `name`) — set that "
+            "field directly instead; doing so is rejected as a validation error. Recognised keys (all "
+            "optional): `maxBillingBytes` (str, BigQuery max billed "
             "bytes), `scratchSchema` (str, schema for data-upload tables), `systemTimezone` (str, default "
             "`UTC`), `queryTimezone` (str, default `NONE`), `allowsUserSpecificTimezones` (bool, default "
             "false), `alwaysScopeViewNames` (bool), `trustServerCertificate` (bool, default false; MSSQL/"
@@ -409,6 +445,17 @@ class CreateConnectionInput(BaseModel):
             "(str), `useMachineAuth` (bool, Athena/Databricks)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _settings_must_not_shadow_first_class_fields(self) -> CreateConnectionInput:
+        if self.settings:
+            collisions = sorted(set(self.settings) & _CREATE_CONNECTION_FIRST_CLASS_KEYS)
+            if collisions:
+                raise ValueError(
+                    f"settings must not repeat first-class field keys: {', '.join(collisions)}. "
+                    "Set these directly on the tool's own parameters instead of via settings."
+                )
+        return self
 
 
 @mcp.tool(
@@ -452,11 +499,13 @@ async def omni_create_connection(params: CreateConnectionInput) -> str:
     was hit.
     """
     try:
-        body: dict[str, Any] = {
-            "dialect": params.dialect,
-            "name": params.name,
-            "passwordUnencrypted": params.password_unencrypted,
-        }
+        # `settings` is merged in FIRST so the first-class fields below always
+        # win on key collision; the model validator additionally rejects a
+        # `settings` key that repeats a first-class field outright.
+        body: dict[str, Any] = dict(params.settings) if params.settings else {}
+        body["dialect"] = params.dialect
+        body["name"] = params.name
+        body["passwordUnencrypted"] = params.password_unencrypted
         optional: dict[str, Any] = {
             "host": params.host,
             "port": params.port,
@@ -474,8 +523,6 @@ async def omni_create_connection(params: CreateConnectionInput) -> str:
         for key, value in optional.items():
             if value is not None:
                 body[key] = value
-        if params.settings:
-            body.update(params.settings)
 
         payload = await get_client().request_json("POST", "/v1/connections", json_body=body)
         result: dict[str, Any] = payload if isinstance(payload, dict) else {}
@@ -494,7 +541,7 @@ class EnvironmentUserAttributeInput(BaseModel):
         ..., min_length=1, description="The name of the user attribute to use for environments."
     )
     default_values: list[str] = Field(
-        ..., min_length=1, description="Array of default values for the user attribute (selects the base connection)."
+        ..., description="Array of default values for the user attribute (selects the base connection)."
     )
 
 
@@ -504,18 +551,20 @@ class UpdateConnectionInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     connection_id: str = Field(..., min_length=1, description="The connection's UUID.")
-    password_unencrypted: str | None = Field(
+    password_unencrypted: CredentialStr | None = Field(
         default=None,
         description=(
-            "New password for credential rotation. Postgres/MySQL/etc.: the new password. BigQuery: the "
-            "entire new service account JSON file content as a string."
+            "New password for credential rotation. Sent verbatim, without whitespace-stripping. Postgres/"
+            "MySQL/etc.: the new password. BigQuery: the entire new service account JSON file content as a "
+            "string."
         ),
     )
-    private_key: str | None = Field(
+    private_key: CredentialStr | None = Field(
         default=None,
         description=(
             "Applicable only to Snowflake connections. New RSA private key in PEM format, for keypair "
-            "rotation. Must be at least 2048 bits."
+            "rotation. Must be at least 2048 bits. Sent verbatim, without whitespace-stripping, since PEM "
+            "formatting may depend on exact whitespace."
         ),
     )
     base_role: str | None = Field(
@@ -671,12 +720,17 @@ async def omni_delete_connection(params: DeleteConnectionInput) -> str:
     authentication; 403 means the caller lacks Connection Admin permissions on
     the connection; 404 means the connection does not exist or belongs to
     another organization; **410 means the connection was already archived** —
-    this is not an error to retry, the connection is already in the desired
-    (archived) state.
+    this tool detects that case itself and returns a plain confirmation
+    instead of an error, since the connection is already in the desired
+    (archived) state and there is nothing to retry.
     """
     try:
         await get_client().request_json("DELETE", f"/v1/connections/{_quote(params.connection_id)}")
         return f"Archived connection `{params.connection_id}` (moved to trash)."
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 410:
+            return f"Connection `{params.connection_id}` is already archived (no action taken)."
+        return handle_api_error(exc)
     except Exception as exc:
         return handle_api_error(exc)
 

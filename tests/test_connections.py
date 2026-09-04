@@ -281,6 +281,75 @@ async def test_create_connection_settings_passthrough(monkeypatch: pytest.Monkey
     assert kwargs["json_body"]["region"] == "us"
 
 
+def test_create_connection_settings_colliding_with_name_rejected() -> None:
+    with pytest.raises(ValueError):
+        CreateConnectionInput(dialect="postgres", name="X", password_unencrypted="pw", settings={"name": "shadow-name"})
+
+
+def test_create_connection_settings_colliding_with_password_rejected() -> None:
+    with pytest.raises(ValueError):
+        CreateConnectionInput(
+            dialect="postgres",
+            name="X",
+            password_unencrypted="pw",
+            settings={"passwordUnencrypted": "shadow-password"},
+        )
+
+
+async def test_create_connection_first_class_fields_win_over_settings_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense-in-depth: even bypassing the collision validator, the body-building
+
+    order must still let first-class fields win — `settings` is merged first.
+    """
+    fake = _FakeClient(payload={"success": True, "data": "id-4"})
+    monkeypatch.setattr("omni_mcp.tools.connections.get_client", lambda: fake)
+    params = CreateConnectionInput.model_construct(
+        dialect="postgres",
+        name="Real Name",
+        password_unencrypted="real-password",
+        host=None,
+        port=None,
+        database=None,
+        username=None,
+        warehouse=None,
+        base_role=None,
+        default_schema=None,
+        include_schemas=None,
+        include_other_catalogs=None,
+        query_timeout_seconds=None,
+        region=None,
+        private_key=None,
+        settings={"name": "shadow-name", "passwordUnencrypted": "shadow-password"},
+    )
+
+    await omni_create_connection(params)
+
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"]["name"] == "Real Name"
+    assert kwargs["json_body"]["passwordUnencrypted"] == "real-password"
+
+
+async def test_create_connection_preserves_password_whitespace_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload={"success": True, "data": "id-5"})
+    monkeypatch.setattr("omni_mcp.tools.connections.get_client", lambda: fake)
+
+    await omni_create_connection(CreateConnectionInput(dialect="postgres", name="X", password_unencrypted="  pa ss  "))
+
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"]["passwordUnencrypted"] == "  pa ss  "
+    assert kwargs["json_body"]["name"] == "X"
+
+
+def test_create_connection_preserves_private_key_whitespace_verbatim() -> None:
+    params = CreateConnectionInput(
+        dialect="snowflake", name="X", password_unencrypted="pw", private_key="  -----BEGIN KEY-----  "
+    )
+
+    assert params.private_key == "  -----BEGIN KEY-----  "
+
+
 async def test_create_connection_error_400(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(exc=_http_error(400, "Missing required field for dialect"))
     monkeypatch.setattr("omni_mcp.tools.connections.get_client", lambda: fake)
@@ -334,6 +403,28 @@ async def test_update_connection_clear_environment_user_attribute(monkeypatch: p
     await omni_update_connection(UpdateConnectionInput(connection_id="conn-1", clear_environment_user_attribute=True))
 
     assert fake.calls == [("PATCH", "/v1/connections/conn-1", {"json_body": {"environmentUserAttribute": None}})]
+
+
+async def test_update_connection_preserves_password_whitespace_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload={"success": True})
+    monkeypatch.setattr("omni_mcp.tools.connections.get_client", lambda: fake)
+
+    await omni_update_connection(UpdateConnectionInput(connection_id="conn-1", password_unencrypted="  pa ss  "))
+
+    assert fake.calls == [("PATCH", "/v1/connections/conn-1", {"json_body": {"passwordUnencrypted": "  pa ss  "}})]
+
+
+def test_update_connection_preserves_private_key_whitespace_verbatim() -> None:
+    params = UpdateConnectionInput(connection_id="conn-1", private_key="  -----BEGIN KEY-----  ")
+
+    assert params.private_key == "  -----BEGIN KEY-----  "
+
+
+def test_environment_user_attribute_allows_empty_default_values() -> None:
+    """The spec requires the `defaultValues` key, not a non-empty array."""
+    params = EnvironmentUserAttributeInput(attribute_name="environment", default_values=[])
+
+    assert params.default_values == []
 
 
 async def test_update_connection_sets_environment_user_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,7 +485,18 @@ async def test_delete_connection_already_archived_410(monkeypatch: pytest.Monkey
 
     result = await omni_delete_connection(DeleteConnectionInput(connection_id="conn-1"))
 
-    assert result.startswith("Error (410):")
+    assert result == "Connection `conn-1` is already archived (no action taken)."
+
+
+async def test_delete_connection_other_error_status_still_uses_handle_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeClient(exc=_http_error(403, "Caller lacks Connection Admin permissions."))
+    monkeypatch.setattr("omni_mcp.tools.connections.get_client", lambda: fake)
+
+    result = await omni_delete_connection(DeleteConnectionInput(connection_id="conn-1"))
+
+    assert result.startswith("Error (403):")
 
 
 # --------------------------------------------------------------------------- #
