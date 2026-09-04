@@ -1,0 +1,15 @@
+.venv
+.env
+.git
+.gitignore
+.github/
+__pycache__
+*.py[oc]
+*.egg-info
+build/
+dist/
+tests/
+scripts/
+.pre-commit-config.yaml
+*.md
+!README.md

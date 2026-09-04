@@ -1,0 +1,100 @@
+[project]
+name = "omni-mcp"
+version = "0.1.0"
+description = "MCP server for the Omni REST API (stdio)."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Alejandro Latorre" }]
+keywords = [
+    "mcp",
+    "omni",
+    "business-intelligence",
+    "analytics",
+    "llm-tools",
+    "model-context-protocol",
+    "mcp-server",
+]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.13"
+dependencies = [
+    # Capped below 2.0: the SDK's 2.x line drops `mcp.server.fastmcp` (FastMCP was
+    # renamed) and moves `mcp.types` out to a separate package, so an unbounded
+    # spec makes `uvx omni-mcp` resolve to 2.x and die with ModuleNotFoundError
+    # on import.
+    "mcp>=1.1.0,<2",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "python-dotenv>=1.0",
+    # Query results arrive as base64-encoded Apache Arrow tables.
+    "pyarrow>=17",
+]
+
+[project.urls]
+Homepage = "https://github.com/trustxai/omni-mcp"
+Repository = "https://github.com/trustxai/omni-mcp"
+Issues = "https://github.com/trustxai/omni-mcp/issues"
+Changelog = "https://github.com/trustxai/omni-mcp/blob/main/CHANGELOG.md"
+
+[project.scripts]
+omni-mcp = "omni_mcp.server:main_stdio"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omni_mcp"]
+
+[dependency-groups]
+dev = [
+    # mcp[cli] provides the `mcp` dev CLI (mcp dev / inspector); the runtime
+    # server is stdio-only and needs only core `mcp`, so the CLI extra lives here.
+    "mcp[cli]>=1.1.0,<2",
+    "pre-commit>=4.0",
+    "ruff>=0.11",
+    "mypy>=1.14",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live: integration tests against a real Omni instance (requires .env credentials)",
+    "destructive: mutating integration tests (requires OMNI_TEST_ALLOW_DESTRUCTIVE=1)",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["mcp", "pydantic", "httpx", "pyarrow"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["omni_mcp.*"]
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# pyarrow ships no py.typed marker.
+module = ["pyarrow.*"]
+ignore_missing_imports = true
