@@ -111,7 +111,10 @@ def _suggestion_summary(item: Mapping[str, Any]) -> str:
 
 def _success_confirmation(body: Any, *, action: str, subject: str) -> str:
     """Short confirmation string for the `SuccessResponse`-shaped mutations."""
-    ok = body.get("success", True) if isinstance(body, dict) else True
+    # An empty or non-JSON body still counts as success (a 204 on a mutation that
+    # did not fail); a body the API actually sent must say `success: true` — a
+    # missing flag is not a confirmation.
+    ok = body.get("success") is True if isinstance(body, dict) and body else True
     if ok:
         return f"{action} {subject}."
     return f"{action.rstrip('.')} request for {subject} completed, but the API did not confirm success."
