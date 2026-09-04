@@ -13,7 +13,7 @@ import urllib.parse
 from typing import Any
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from omni_mcp.client import get_client
 from omni_mcp.errors import handle_api_error
@@ -44,11 +44,15 @@ def _quote(value: str) -> str:
     return urllib.parse.quote(value, safe="")
 
 
-def _group_rows(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _group_rows(resources: list[Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for group in resources:
-        meta = group.get("meta") or {}
-        members = group.get("members") or []
+        if not isinstance(group, dict):
+            continue
+        raw_meta = group.get("meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        members = group.get("members")
+        members = members if isinstance(members, list) else []
         rows.append(
             {
                 "id": group.get("id", "unknown"),
@@ -62,8 +66,10 @@ def _group_rows(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _render_group_detail(group: dict[str, Any]) -> str:
-    meta = group.get("meta") or {}
-    members = group.get("members") or []
+    raw_meta = group.get("meta")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    raw_members = group.get("members")
+    members = [member for member in raw_members if isinstance(member, dict)] if isinstance(raw_members, list) else []
     lines = [
         f"# User Group: {group.get('displayName', 'unknown')}",
         "",
@@ -82,7 +88,7 @@ def _render_group_detail(group: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _model_role_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _model_role_rows(results: list[Any]) -> list[dict[str, Any]]:
     return [
         {
             "modelId": item.get("modelId", "unknown"),
@@ -91,13 +97,17 @@ def _model_role_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "baseRole": item.get("baseRole", "unknown"),
         }
         for item in results
+        if isinstance(item, dict)
     ]
 
 
-def _user_model_role_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _user_model_role_rows(results: list[Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in results:
-        source = item.get("from") or {}
+        if not isinstance(item, dict):
+            continue
+        raw_source = item.get("from")
+        source: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
         source_type = source.get("type", "unknown")
         if source_type == "Group Role" and source.get("name"):
             source_text = f"{source_type} ({source.get('name')})"
@@ -165,13 +175,17 @@ class CreateUserGroupInput(BaseModel):
         default=None,
         description=(
             "Raw SCIM request body, sent verbatim instead of the body built from display_name/member_ids. "
-            "Wins over those fields when provided."
+            "Mutually exclusive with those fields."
         ),
     )
 
     @model_validator(mode="after")
     def _require_display_name_or_body(self) -> CreateUserGroupInput:
-        if self.scim_body is None and not self.display_name:
+        if self.scim_body is not None:
+            if self.display_name is not None or self.member_ids is not None:
+                raise ValueError("scim_body is a raw override: send it on its own, without display_name or member_ids.")
+            return self
+        if not self.display_name:
             raise ValueError("display_name is required unless scim_body is provided.")
         return self
 
@@ -199,13 +213,17 @@ class ReplaceUserGroupInput(BaseModel):
         default=None,
         description=(
             "Raw SCIM request body, sent verbatim instead of the body built from display_name/member_ids. "
-            "Wins over those fields when provided."
+            "Mutually exclusive with those fields."
         ),
     )
 
     @model_validator(mode="after")
     def _require_full_body(self) -> ReplaceUserGroupInput:
-        if self.scim_body is None and (self.display_name is None or self.member_ids is None):
+        if self.scim_body is not None:
+            if self.display_name is not None or self.member_ids is not None:
+                raise ValueError("scim_body is a raw override: send it on its own, without display_name or member_ids.")
+            return self
+        if self.display_name is None or self.member_ids is None:
             raise ValueError("display_name and member_ids are both required unless scim_body is provided.")
         return self
 
@@ -236,13 +254,30 @@ class UpdateUserGroupInput(BaseModel):
         default=None,
         description=(
             "Raw SCIM `Operations` array, sent verbatim instead of the operations built from "
-            "add_member_ids/remove_member_ids/display_name. Wins over those fields when provided."
+            "add_member_ids/remove_member_ids/display_name. Mutually exclusive with those fields."
         ),
     )
+
+    @field_validator("remove_member_ids")
+    @classmethod
+    def _reject_unquotable_member_ids(cls, value: list[str] | None) -> list[str] | None:
+        """Ids are interpolated into a SCIM filter string, so they cannot carry its quoting."""
+        for member_id in value or []:
+            if '"' in member_id or "\\" in member_id:
+                raise ValueError(
+                    'remove_member_ids entries must not contain `"` or `\\`: each one is interpolated into the '
+                    'SCIM filter `members[value eq "<id>"]`.'
+                )
+        return value
 
     @model_validator(mode="after")
     def _require_at_least_one_operation(self) -> UpdateUserGroupInput:
         if self.operations is not None:
+            if self.add_member_ids is not None or self.remove_member_ids is not None or self.display_name is not None:
+                raise ValueError(
+                    "operations is a raw override: send it on its own, without add_member_ids, "
+                    "remove_member_ids or display_name."
+                )
             if len(self.operations) == 0:
                 raise ValueError("operations must contain at least one entry when provided.")
             return self
@@ -293,6 +328,14 @@ class AssignUserGroupModelRoleInput(BaseModel):
     connection_id: str | None = Field(default=None, min_length=1, description=_CONNECTION_ID_DESCRIPTION)
     role_name: str = Field(..., min_length=1, description=_ROLE_NAME_DESCRIPTION)
 
+    @model_validator(mode="after")
+    def _require_a_scope(self) -> AssignUserGroupModelRoleInput:
+        if not self.model_id and not self.connection_id:
+            raise ValueError(
+                "Provide model_id, connection_id, or both — connectionId is required when modelId is absent."
+            )
+        return self
+
 
 class GetUserModelRolesInput(BaseModel):
     """Input for `omni_get_user_model_roles`."""
@@ -327,6 +370,14 @@ class AssignUserModelRoleInput(BaseModel):
     model_id: str | None = Field(default=None, min_length=1, description=_MODEL_ID_DESCRIPTION)
     connection_id: str | None = Field(default=None, min_length=1, description=_CONNECTION_ID_DESCRIPTION)
     role_name: str = Field(..., min_length=1, description=_ROLE_NAME_DESCRIPTION)
+
+    @model_validator(mode="after")
+    def _require_a_scope(self) -> AssignUserModelRoleInput:
+        if not self.model_id and not self.connection_id:
+            raise ValueError(
+                "Provide model_id, connection_id, or both — connectionId is required when modelId is absent."
+            )
+        return self
 
 
 @mcp.tool(
@@ -376,7 +427,8 @@ async def omni_list_user_groups(params: ListUserGroupsInput) -> str:
         if params.response_format is ResponseFormat.JSON:
             return truncate_result(to_json(body))
 
-        resources: list[dict[str, Any]] = body.get("Resources") or []
+        raw_resources = body.get("Resources")
+        resources: list[Any] = raw_resources if isinstance(raw_resources, list) else []
         total = body.get("totalResults")
         items_per_page = body.get("itemsPerPage")
         start_index = body.get("startIndex", params.start_index)
@@ -386,7 +438,14 @@ async def omni_list_user_groups(params: ListUserGroupsInput) -> str:
             lines.append(f"Showing **{len(resources):,}** of **{total:,}** group(s) (startIndex {start_index}).")
         else:
             lines.append(f"Showing **{len(resources):,}** group(s) (startIndex {start_index}).")
-        if isinstance(total, int) and isinstance(items_per_page, int) and (start_index - 1) + items_per_page < total:
+        # `itemsPerPage == 0` would make the "next page" hint point at the page
+        # just fetched, so callers would loop on it forever.
+        if (
+            isinstance(total, int)
+            and isinstance(items_per_page, int)
+            and items_per_page > 0
+            and (start_index - 1) + items_per_page < total
+        ):
             next_index = start_index + items_per_page
             lines.append(f"More available — pass `start_index={next_index}` to fetch the next page.")
         else:
@@ -492,7 +551,7 @@ async def omni_create_user_group(params: CreateUserGroupInput) -> str:
         name = group.get("displayName", params.display_name or "unknown")
         group_id = group.get("id", "unknown")
         member_count = len(group.get("members") or [])
-        return f"Created user group **{name}** (id `{group_id}`) with {member_count} member(s)."
+        return truncate_result(f"Created user group **{name}** (id `{group_id}`) with {member_count} member(s).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -548,7 +607,7 @@ async def omni_replace_user_group(params: ReplaceUserGroupInput) -> str:
         name = group.get("displayName", params.display_name or "unknown")
         group_id = group.get("id", params.user_group_id)
         member_count = len(group.get("members") or [])
-        return f"Replaced user group **{name}** (id `{group_id}`); now has {member_count} member(s)."
+        return truncate_result(f"Replaced user group **{name}** (id `{group_id}`); now has {member_count} member(s).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -613,7 +672,7 @@ async def omni_update_user_group(params: UpdateUserGroupInput) -> str:
         name = group.get("displayName", "unknown")
         group_id = group.get("id", params.user_group_id)
         member_count = len(group.get("members") or [])
-        return f"Updated user group **{name}** (id `{group_id}`); now has {member_count} member(s)."
+        return truncate_result(f"Updated user group **{name}** (id `{group_id}`); now has {member_count} member(s).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -656,7 +715,7 @@ async def omni_delete_user_group(params: DeleteUserGroupInput) -> str:
     try:
         path = f"/scim/v2/groups/{_quote(params.user_group_id)}"
         await get_client().request_json("DELETE", path)
-        return f"Deleted user group (id `{params.user_group_id}`)."
+        return truncate_result(f"Deleted user group (id `{params.user_group_id}`).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -713,7 +772,8 @@ async def omni_get_user_group_model_roles(params: GetUserGroupModelRolesInput) -
         if params.response_format is ResponseFormat.JSON:
             return truncate_result(to_json(body))
 
-        results: list[dict[str, Any]] = body.get("results") or []
+        raw_results = body.get("results")
+        results: list[Any] = raw_results if isinstance(raw_results, list) else []
         lines = [f"# Model Roles — User Group `{body.get('userGroupId', params.user_group_id)}`", ""]
         lines.append(markdown_table(_model_role_rows(results)) if results else "_No model role assignments found._")
         return truncate_result("\n".join(lines))
@@ -780,7 +840,7 @@ async def omni_assign_user_group_model_role(params: AssignUserGroupModelRoleInpu
         if result.get("connectionId") or params.connection_id:
             scope.append(f"connection `{result.get('connectionId', params.connection_id)}`")
         scope_text = f" for {' / '.join(scope)}" if scope else ""
-        return f"Assigned role **{role_name}** to user group `{group_id}`{scope_text}."
+        return truncate_result(f"Assigned role **{role_name}** to user group `{group_id}`{scope_text}.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -840,7 +900,8 @@ async def omni_get_user_model_roles(params: GetUserModelRolesInput) -> str:
         if params.response_format is ResponseFormat.JSON:
             return truncate_result(to_json(body))
 
-        results: list[dict[str, Any]] = body.get("results") or []
+        raw_results = body.get("results")
+        results: list[Any] = raw_results if isinstance(raw_results, list) else []
         membership_id = body.get("membershipId", "unknown")
         lines = [f"# Model Roles — User `{params.user_id}` (membership `{membership_id}`)", ""]
         lines.append(
@@ -910,6 +971,6 @@ async def omni_assign_user_model_role(params: AssignUserModelRoleInput) -> str:
         if result.get("connectionId") or params.connection_id:
             scope.append(f"connection `{result.get('connectionId', params.connection_id)}`")
         scope_text = f" for {' / '.join(scope)}" if scope else ""
-        return f"Assigned role **{role_name}** to user `{user_id}`{scope_text}."
+        return truncate_result(f"Assigned role **{role_name}** to user `{user_id}`{scope_text}.")
     except Exception as exc:
         return handle_api_error(exc)

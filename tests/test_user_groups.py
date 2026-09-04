@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from omni_mcp.formatters import ResponseFormat
 from omni_mcp.tools.user_groups import (
@@ -747,3 +748,70 @@ def test_list_user_groups_rejects_non_positive_count() -> None:
 def test_create_user_group_display_name_max_length() -> None:
     with pytest.raises(ValueError):
         CreateUserGroupInput(display_name="x" * 65)
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: raw-override mixing, filter quoting, paging, guards
+# ---------------------------------------------------------------------------
+
+
+def test_raw_scim_overrides_cannot_be_mixed_with_typed_fields() -> None:
+    """The override used to win silently, dropping the typed field unannounced."""
+    with pytest.raises(ValidationError, match="raw override"):
+        CreateUserGroupInput(display_name="Blob Sales", scim_body={"displayName": "Other"})
+    with pytest.raises(ValidationError, match="raw override"):
+        ReplaceUserGroupInput(user_group_id="mEhXj6ZI", display_name="Blob Sales", scim_body={"displayName": "Other"})
+    with pytest.raises(ValidationError, match="raw override"):
+        UpdateUserGroupInput(
+            user_group_id="mEhXj6ZI",
+            display_name="Blob SEs",
+            operations=[{"op": "replace", "path": "displayName", "value": "Other"}],
+        )
+
+
+def test_update_user_group_rejects_member_ids_that_would_break_the_scim_filter() -> None:
+    """Ids are interpolated into `members[value eq "<id>"]`, so quotes cannot pass through."""
+    with pytest.raises(ValidationError, match="SCIM filter"):
+        UpdateUserGroupInput(user_group_id="mEhXj6ZI", remove_member_ids=['x" or displayName pr "'])
+    with pytest.raises(ValidationError, match="SCIM filter"):
+        UpdateUserGroupInput(user_group_id="mEhXj6ZI", remove_member_ids=["back\\slash"])
+
+
+def test_assign_model_role_requires_a_model_or_a_connection() -> None:
+    """`connectionId` is required when `modelId` is absent, per the spec."""
+    with pytest.raises(ValidationError, match="connectionId is required"):
+        AssignUserGroupModelRoleInput(user_group_id="mEhXj6ZI", role_name="QUERIER")
+    with pytest.raises(ValidationError, match="connectionId is required"):
+        AssignUserModelRoleInput(user_id="uid-1", role_name="QUERIER")
+
+
+async def test_list_user_groups_does_not_loop_on_a_zero_page_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`itemsPerPage: 0` with results outstanding would otherwise re-suggest this page."""
+    fake = _FakeClient(payload={"Resources": [], "totalResults": 12, "itemsPerPage": 0, "startIndex": 1})
+    monkeypatch.setattr("omni_mcp.tools.user_groups.get_client", lambda: fake)
+
+    result = await omni_list_user_groups(ListUserGroupsInput())
+
+    assert "start_index=1" not in result
+    assert "End of results." in result
+
+
+async def test_renderers_skip_non_object_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed array entry is skipped rather than raising an AttributeError."""
+    fake = _FakeClient(
+        payload={"Resources": ["nonsense", GROUP], "totalResults": 2, "itemsPerPage": 2, "startIndex": 1}
+    )
+    monkeypatch.setattr("omni_mcp.tools.user_groups.get_client", lambda: fake)
+
+    result = await omni_list_user_groups(ListUserGroupsInput())
+
+    assert "Blob Sales" in result
+    assert not result.startswith("Error")
+
+    roles = _FakeClient(payload={"userGroupId": "mEhXj6ZI", "results": ["nonsense", {"roleName": "QUERIER"}]})
+    monkeypatch.setattr("omni_mcp.tools.user_groups.get_client", lambda: roles)
+
+    result = await omni_get_user_group_model_roles(GetUserGroupModelRolesInput(user_group_id="mEhXj6ZI"))
+
+    assert "QUERIER" in result
+    assert not result.startswith("Error")
