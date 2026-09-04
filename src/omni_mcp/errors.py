@@ -136,9 +136,14 @@ def handle_api_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPError):
         return f"Error: HTTP transport failure – {type(exc).__name__}: {exc}"
     if isinstance(exc, ValidationError):
-        # Raised by `Settings()` when an `OMNI_*` variable is malformed, so it
-        # reaches tools through `get_settings()` rather than the API.
-        return f"Error: invalid configuration – {validation_error_detail(exc)}"
+        # `Settings()` raises this when an `OMNI_*` variable is malformed, so it
+        # reaches tools through `get_settings()` rather than the API. Only that
+        # model is reported as a configuration problem — a validation error from
+        # any other model (a payload model built inside a tool, say) is the
+        # caller's input, not the environment.
+        if exc.title == "Settings":
+            return f"Error: invalid configuration – {validation_error_detail(exc)}"
+        return f"Error: invalid input – {validation_error_detail(exc)}"
     if isinstance(exc, RuntimeError):
         return f"Error: {exc}"
     return f"Error: unexpected failure – {type(exc).__name__}: {exc}"

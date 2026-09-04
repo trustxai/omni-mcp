@@ -73,37 +73,68 @@ def _summarize_roles(roles_by_model: dict[str, Any], limit: int = 10) -> list[st
     return lines
 
 
-def _rejected_base_url(exc: ValidationError) -> str:
-    """The `OMNI_BASE_URL` the server was actually handed, for the error report.
+def _reported_value(exc: ValidationError, field: str) -> str | None:
+    """The value the settings were handed for `field`, or `None` when unknown.
 
-    Read from the environment first; a value that came from a `.env` file is
-    recovered from the input pydantic recorded on the validation error.
+    The environment wins; a value that came from a `.env` file is recovered from
+    the input pydantic recorded on the validation error, which is only available
+    for the fields that actually failed.
     """
-    from_env = os.environ.get("OMNI_BASE_URL")
+    from_env = os.environ.get(field.upper())
     if from_env is not None:
         return from_env
     for error in exc.errors():
-        if error.get("loc") == ("omni_base_url",):
-            return str(error.get("input", ""))
-    return ""
+        if error.get("loc") == (field,):
+            value = error.get("input")
+            if value is not None:
+                return str(value)
+    return None
+
+
+def _rejected_settings(exc: ValidationError) -> list[str]:
+    """The `OMNI_*` variable names pydantic rejected, in report order."""
+    names: list[str] = []
+    for error in exc.errors():
+        location = error.get("loc") or ()
+        name = ".".join(str(part) for part in location).upper()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _invalid_configuration_report(exc: ValidationError) -> str:
     """What `omni_get_api_info` prints when `Settings()` refuses to load.
 
-    Echoes the rejected instance URL — never the API key — so the typo is
-    visible to whoever is fixing the environment.
+    Names the variables that were rejected and echoes the instance URL as given
+    — never the API key — so the typo is visible to whoever is fixing the
+    environment. A value that is neither in the environment nor recoverable from
+    the validation error (a `.env`-only value on a field that validated) is
+    reported as unknown rather than guessed at.
     """
-    rejected = _rejected_base_url(exc)
-    key_configured = bool(os.environ.get("OMNI_API_KEY", "").strip())
+    rejected = ", ".join(f"`{name}`" for name in _rejected_settings(exc)) or "unknown"
+    base_url = _reported_value(exc, "omni_base_url")
+    api_key = _reported_value(exc, "omni_api_key")
+    if api_key is None:
+        key_state = "unknown (the settings never loaded; check `OMNI_API_KEY`)"
+    elif api_key.strip():
+        key_state = "configured"
+    else:
+        key_state = "NOT configured (set OMNI_API_KEY)"
+    if base_url is None:
+        base_url_line = "- `OMNI_BASE_URL` as given: unknown (not in the environment)"
+    elif base_url:
+        base_url_line = f"- `OMNI_BASE_URL` as given: `{base_url}`"
+    else:
+        base_url_line = "- `OMNI_BASE_URL` as given: (empty)"
     lines = [
         "# Omni MCP configuration",
         "",
         "**Invalid configuration** — the settings could not be loaded, so no tool can reach the API.",
         "",
+        f"- Rejected setting(s): {rejected}",
         f"- Problem: {validation_error_detail(exc)}",
-        f"- `OMNI_BASE_URL` as given: `{rejected}`" if rejected else "- `OMNI_BASE_URL` as given: (empty)",
-        f"- API key: {'configured' if key_configured else 'NOT configured (set OMNI_API_KEY)'}",
+        base_url_line,
+        f"- API key: {key_state}",
         "",
         "Fix the variable in the environment or `.env`, then restart the server.",
         "",

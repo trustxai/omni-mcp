@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from omni_mcp.config import Settings
 from omni_mcp.errors import handle_api_error, validation_error_detail
@@ -190,6 +190,23 @@ def test_settings_validation_error_is_reported_as_invalid_configuration() -> Non
     assert "Value error" not in message
     assert "errors.pydantic.dev" not in message
     assert "unexpected failure" not in message
+
+
+def test_a_non_settings_validation_error_is_not_reported_as_configuration() -> None:
+    """Only `Settings` failures are the environment's fault."""
+
+    class Payload(BaseModel):
+        name: str
+
+    try:
+        Payload(name=1)  # type: ignore[arg-type]
+    except ValidationError as exc:
+        message = handle_api_error(exc)
+    else:  # pragma: no cover - pydantic always rejects this
+        raise AssertionError("Payload accepted an int name")
+
+    assert message.startswith("Error: invalid input – ")
+    assert "configuration" not in message
 
 
 def test_validation_error_detail_falls_back_when_pydantic_reports_no_message() -> None:

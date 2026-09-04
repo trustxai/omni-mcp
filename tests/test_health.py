@@ -165,6 +165,8 @@ async def test_api_info_survives_an_invalid_base_url(misconfigured: None) -> Non
     # The rejected value is echoed back so the typo is visible…
     assert "`acme.omniapp.co`" in result
     assert "must start with http:// or https://" in result
+    # …the failing variable is named rather than assumed…
+    assert "Rejected setting(s): `OMNI_BASE_URL`" in result
     # …and the tool still answers the rest of the question.
     for module in TOOL_MODULES:
         assert f"`{module}`" in result
@@ -175,6 +177,40 @@ async def test_api_info_never_echoes_the_key_when_the_config_is_invalid(misconfi
 
     assert "secret-key" not in result
     assert "API key: configured" in result
+
+
+@pytest.fixture
+def misconfigured_key_outside_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed URL, with no `OMNI_API_KEY` in the environment at all.
+
+    A key that only exists in `.env` cannot be recovered from the validation
+    error (pydantic records inputs for the failing fields only).
+    """
+    monkeypatch.setenv("OMNI_BASE_URL", "acme.omniapp.co")
+    monkeypatch.delenv("OMNI_API_KEY", raising=False)
+    get_settings.cache_clear()
+
+
+async def test_api_info_reports_an_unknown_key_state_rather_than_guessing(
+    misconfigured_key_outside_the_environment: None,
+) -> None:
+    result = await omni_get_api_info(ApiInfoInput())
+
+    assert "API key: unknown" in result
+    # Never claimed as missing: the key may well be configured in `.env`.
+    assert "NOT configured (set OMNI_API_KEY)" not in result
+
+
+async def test_api_info_reports_a_rejected_key_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-`OMNI_BASE_URL` failure is reported as itself, not as a URL problem."""
+    monkeypatch.setenv("OMNI_BASE_URL", "https://acme.omniapp.co")
+    monkeypatch.setenv("OMNI_MAX_RETRIES", "not-a-number")
+    get_settings.cache_clear()
+
+    result = await omni_get_api_info(ApiInfoInput())
+
+    assert "Rejected setting(s): `OMNI_MAX_RETRIES`" in result
+    assert "`OMNI_BASE_URL` as given: `https://acme.omniapp.co`" in result
 
 
 async def test_health_check_reports_an_invalid_base_url(misconfigured: None) -> None:
