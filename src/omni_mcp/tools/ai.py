@@ -4,16 +4,19 @@ Covers every operation under the API's `AI` tag plus one convenience tool
 (`omni_ask_ai`) that chains create-job → poll-status → fetch-result so a caller
 gets an answer in a single tool call.
 
-`GET /v1/ai/jobs/{jobId}/result` is *streamed* by the API. These tools never
-stream to the MCP client: the whole body is read with a generous timeout and
-assembled here (Server-Sent Events are parsed and merged; a plain JSON body is
-decoded), so the tool result is always the final, complete answer.
+`GET /v1/ai/jobs/{jobId}/result` returns one JSON result object that the API
+serves "streamed directly from storage" — chunked transfer of a single
+document, not an event protocol. These tools never stream to the MCP client:
+the whole body is read with a generous timeout and decoded here, so the tool
+result is always the final, complete answer. A `text/event-stream` fallback is
+kept for the case where an instance serves the endpoint as Server-Sent Events.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import quote
@@ -34,17 +37,21 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
-#: Every state an AI job can report (`state` on `GET /v1/ai/jobs/{jobId}`).
-JOB_STATES: tuple[str, ...] = ("CANCELLED", "COMPLETE", "DELIVERING", "EXECUTING", "FAILED", "QUEUED")
-
 #: States after which polling stops — the job will not change again.
 TERMINAL_JOB_STATES: frozenset[str] = frozenset({"CANCELLED", "COMPLETE", "FAILED"})
 
 #: Sentinel `data:` payloads that close a Server-Sent Events stream.
 SSE_SENTINELS: frozenset[str] = frozenset({"[DONE]", "[done]"})
 
-#: Default read timeout (seconds) for the streamed job-result endpoint.
+#: Default read timeout (seconds) for the job-result endpoint.
 RESULT_TIMEOUT_SECONDS = 120.0
+
+#: Per-request timeout ceiling for one `omni_ask_ai` status poll.
+STATUS_POLL_TIMEOUT_SECONDS = 30.0
+
+#: Hard cap on `omni_ask_ai` status polls, so one call can never eat the key's
+#: 60 requests/minute budget however the interval and wait are set.
+MAX_POLL_ATTEMPTS = 60
 
 #: How many CSV characters of a query result are shown per action in markdown.
 CSV_PREVIEW_CHARS = 2_000
@@ -52,69 +59,87 @@ CSV_PREVIEW_CHARS = 2_000
 #: Injectable sleep for the `omni_ask_ai` poll loop (monkeypatched in tests).
 _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
+#: Injectable monotonic clock for the `omni_ask_ai` deadline (ditto). Wall-clock
+#: time, not accumulated sleep, is what bounds the wait.
+_monotonic: Callable[[], float] = time.monotonic
+
 
 # --------------------------------------------------------------------------
 # Streamed-result decoding
 # --------------------------------------------------------------------------
 
 
-def _merge_chunk(merged: dict[str, Any], chunk: dict[str, Any]) -> None:
-    """Fold one decoded stream chunk into the accumulated result object.
-
-    Lists are concatenated (the `actions` array arrives a step at a time) and
-    dicts merged recursively. For strings the stream may send either cumulative
-    snapshots or incremental deltas, so a value that starts with what we already
-    have replaces it and anything else is appended.
-    """
-    for key, value in chunk.items():
-        current = merged.get(key)
-        if isinstance(current, list) and isinstance(value, list):
-            current.extend(value)
-        elif isinstance(current, dict) and isinstance(value, dict):
-            _merge_chunk(current, value)
-        elif isinstance(current, str) and isinstance(value, str):
-            merged[key] = value if value.startswith(current) else current + value
-        elif isinstance(value, list):
-            merged[key] = list(value)
-        elif isinstance(value, dict):
-            merged[key] = dict(value)
-        else:
-            merged[key] = value
-
-
 def _parse_sse(body: str) -> dict[str, Any]:
-    """Assemble one result object from a `text/event-stream` body.
+    """Assemble one result object from a `text/event-stream` body (fallback path).
 
-    Only `data:` lines carry payload; comments (`:` heartbeats) and the
-    `event:`/`id:`/`retry:` fields are ignored, and `[DONE]`-style sentinels end
-    the payload. JSON chunks are merged in arrival order; non-JSON fragments are
-    concatenated into `message`.
+    Parsed per the SSE wire format: an event accumulates its `data:` lines,
+    joined with newlines, and is dispatched at the blank line that ends it;
+    comments (`:` heartbeats) and the other fields are ignored, and a
+    `[DONE]`-style sentinel ends the stream.
+
+    Assembly is deterministic rather than heuristic: the **last** event that
+    decodes to a complete result object (one carrying `message` or `actions`)
+    wins, since the endpoint's documented payload is a single flat object. When
+    no event carries a complete object, the raw non-JSON fragments are
+    concatenated in order into `message`; fragments alongside a complete object
+    are appended to its message rather than dropped.
     """
-    merged: dict[str, Any] = {}
-    text_parts: list[str] = []
-    for raw_line in body.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(":") or not line.startswith("data:"):
-            continue
-        payload = line[len("data:") :].strip()
-        if not payload or payload in SSE_SENTINELS or payload.strip('"') in SSE_SENTINELS:
-            continue
+    result: dict[str, Any] = {}
+    fragments: list[str] = []
+    data_lines: list[str] = []
+    done = False
+
+    def _dispatch() -> None:
+        nonlocal result, done
+        if not data_lines:
+            return
+        payload = "\n".join(data_lines)
+        data_lines.clear()
+        stripped = payload.strip()
+        if not stripped:
+            return
+        if stripped in SSE_SENTINELS or stripped.strip('"') in SSE_SENTINELS:
+            done = True
+            return
         try:
-            chunk = json.loads(payload)
+            decoded = json.loads(payload)
         except ValueError:
-            text_parts.append(payload)
+            fragments.append(payload)
+            return
+        if isinstance(decoded, dict) and ("message" in decoded or "actions" in decoded):
+            result = decoded
+        elif isinstance(decoded, str):
+            fragments.append(decoded)
+
+    for raw_line in body.splitlines():
+        if done:
+            break
+        line = raw_line.rstrip("\r")
+        if not line:
+            _dispatch()
             continue
-        if isinstance(chunk, dict):
-            _merge_chunk(merged, chunk)
-        elif isinstance(chunk, str) and chunk not in SSE_SENTINELS:
-            text_parts.append(chunk)
-    if text_parts and not merged.get("message"):
-        merged["message"] = "".join(text_parts)
-    return merged
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        if field != "data":
+            continue
+        data_lines.append(value[1:] if value.startswith(" ") else value)
+    if not done:
+        _dispatch()
+
+    text = "".join(fragments)
+    if text:
+        existing = result.get("message")
+        result["message"] = f"{existing}{text}" if isinstance(existing, str) else text
+    return result
 
 
 def _decode_job_result(response: httpx.Response) -> dict[str, Any]:
-    """Turn the fully-read job-result response into a result object."""
+    """Turn the fully-read job-result response into a result object.
+
+    The documented payload is a single JSON object, so that is the primary
+    path; `text/event-stream` falls back to :func:`_parse_sse`.
+    """
     content_type = (response.headers.get("content-type") or "").lower()
     text = response.text or ""
     if "text/event-stream" in content_type:
@@ -124,10 +149,11 @@ def _decode_job_result(response: httpx.Response) -> dict[str, Any]:
     try:
         decoded = json.loads(text)
     except ValueError:
-        # An unmarked event stream, or plain prose from storage.
-        return _parse_sse(text) if "data:" in text else {"message": text}
+        return {"message": text}
     if isinstance(decoded, dict):
         return decoded
+    if isinstance(decoded, list):
+        return {"message": to_json(decoded)}
     return {"message": str(decoded)}
 
 
@@ -467,7 +493,7 @@ class GetAiJobResultInput(BaseModel):
         default=RESULT_TIMEOUT_SECONDS,
         ge=5,
         le=600,
-        description="How long to wait while the streamed result body is read in full (5-600 seconds).",
+        description="How long to wait while the result body is read in full (5-600 seconds).",
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
@@ -523,17 +549,20 @@ class AskAiInput(BaseModel):
     )
     poll_interval_seconds: float = Field(
         default=2.0,
-        ge=1,
+        ge=2,
         le=30,
-        description="Seconds to wait between job-status polls (the API recommends 2-5).",
+        description=(
+            "Seconds to wait between job-status polls (the API recommends 2-5; 2 is the floor because the key "
+            "allows only 60 requests per minute)."
+        ),
     )
     max_wait_seconds: float = Field(
         default=120.0,
         ge=5,
         le=900,
         description=(
-            "Give up after this many seconds of polling and return the job and conversation IDs instead. Jobs "
-            "typically complete in 15-60 seconds."
+            "Give up after this much elapsed wall-clock time and return the job and conversation IDs instead. Jobs "
+            f"typically complete in 15-60 seconds. Polling also stops after {MAX_POLL_ATTEMPTS} status requests."
         ),
     )
     response_format: ResponseFormat = Field(
@@ -1143,8 +1172,8 @@ async def omni_cancel_ai_job(params: CancelAiJobInput) -> str:
 async def omni_get_ai_job_result(params: GetAiJobResultInput) -> str:
     """Get the full result of a completed AI job — the answer plus every action taken.
 
-    The API streams this endpoint; the whole body is read and assembled here
-    (Server-Sent Events are parsed and merged, a JSON body is decoded) so the
+    The API serves this endpoint streamed from storage — chunked transfer of a
+    single JSON result object. The whole body is read and decoded here, so the
     tool returns one finished answer, never a partial stream. Results exist only
     for jobs in `COMPLETE` state and are retained for 14 days.
 
@@ -1208,8 +1237,8 @@ async def omni_search_omni_docs(params: SearchOmniDocsInput) -> str:
     - To search dashboards or documents (use the content/document tools).
 
     Returns:
-    A markdown answer followed by a table of source titles, URLs and snippets,
-    or the raw payload when `response_format` is `json`. On failure, an
+    A markdown answer followed by a table of source titles and URLs, or the
+    raw payload when `response_format` is `json`. On failure, an
     `Error ...` string.
 
     Examples:
@@ -1231,14 +1260,7 @@ async def omni_search_omni_docs(params: SearchOmniDocsInput) -> str:
             return truncate_result(to_json(body))
 
         sources = _dicts(body.get("sources"))
-        rows = [
-            {
-                "Title": source.get("title", "untitled"),
-                "URL": source.get("url", ""),
-                "Snippet": source.get("snippet") or source.get("excerpt") or source.get("content") or "",
-            }
-            for source in sources
-        ]
+        rows = [{"Title": source.get("title", "untitled"), "URL": source.get("url", "")} for source in sources]
         lines = [
             "# Documentation answer",
             "",
@@ -1268,9 +1290,9 @@ async def omni_ask_ai(params: AskAiInput) -> str:
 
     A convenience chain over three endpoints: create the job, poll its status
     every `poll_interval_seconds` until it reaches a terminal state
-    (`COMPLETE`, `FAILED` or `CANCELLED`) or `max_wait_seconds` elapses, then
-    fetch and assemble the streamed result. Nothing is streamed to the caller —
-    the answer arrives complete, once.
+    (`COMPLETE`, `FAILED` or `CANCELLED`), until `max_wait_seconds` of wall-clock
+    time has elapsed, or until the poll cap is hit — then fetch and decode the
+    result. Nothing is streamed to the caller: the answer arrives complete, once.
 
     When to Use:
     - For a one-shot question where you want the answer, not a job handle.
@@ -1323,30 +1345,37 @@ async def omni_ask_ai(params: AskAiInput) -> str:
         status_path = f"/v1/ai/jobs/{quote(job_id, safe='')}"
         status: dict[str, Any] = {}
         state = ""
-        elapsed = 0.0
         timed_out = False
+        # A monotonic deadline, not accumulated sleep: a slow status request
+        # spends the budget just as surely as waiting between polls does.
+        deadline = _monotonic() + params.max_wait_seconds
+        polls = 0
         while True:
-            polled = await client.request_json("GET", status_path)
+            remaining = deadline - _monotonic()
+            if remaining <= 0 or polls >= MAX_POLL_ATTEMPTS:
+                timed_out = True
+                break
+            polls += 1
+            polled = await client.request_json("GET", status_path, timeout=min(remaining, STATUS_POLL_TIMEOUT_SECONDS))
             status = polled if isinstance(polled, dict) else {}
             state = str(status.get("state") or "").upper()
             if status.get("conversationId"):
                 conversation_id = str(status["conversationId"])
             if state in TERMINAL_JOB_STATES:
                 break
-            if elapsed + params.poll_interval_seconds > params.max_wait_seconds:
-                timed_out = True
-                break
             await _sleep(params.poll_interval_seconds)
-            elapsed += params.poll_interval_seconds
 
         resume = (
             f"Resume with `omni_get_ai_job_status` / `omni_get_ai_job_result` using job `{job_id}` "
             f"(conversation `{conversation_id}`)."
         )
         if timed_out:
+            reason = (
+                f"after {polls} status polls" if polls >= MAX_POLL_ATTEMPTS else f"within {params.max_wait_seconds:g}s"
+            )
             return (
-                f"The AI job did not finish within {params.max_wait_seconds:g}s (last state: "
-                f"**{state or 'unknown'}**). It is still running. {resume}"
+                f"The AI job did not finish {reason} (last state: **{state or 'unknown'}**). "
+                f"It is still running. {resume}"
             )
         if state == "FAILED":
             error = status.get("error")

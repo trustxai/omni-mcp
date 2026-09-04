@@ -10,6 +10,7 @@ import pytest
 
 from omni_mcp.formatters import ResponseFormat
 from omni_mcp.tools.ai import (
+    MAX_POLL_ATTEMPTS,
     AskAiInput,
     CancelAiJobInput,
     CreateAiJobInput,
@@ -147,21 +148,21 @@ JOB_RESULT: dict[str, Any] = {
     ],
 }
 
+# One event per blank-line-delimited block; the second full object supersedes the
+# first, and the final `message` arrives as a multi-line `data:` event.
 SSE_BODY = "\n".join(
     [
         ": heartbeat",
         "",
-        "event: action",
-        'data: {"actions": [{"type": "generate_query", "message": "Generating the query", "timestamp": "2025-01-15T10:00:10.000Z"}]}',
+        "event: progress",
+        'data: {"actions": [{"type": "generate_query", "message": "Generating the query",',
+        'data:  "timestamp": "2025-01-15T10:00:10.000Z"}]}',
         "",
-        "event: action",
-        'data: {"actions": [{"type": "summarize", "message": "Summarizing", "timestamp": "2025-01-15T10:00:20.000Z"}]}',
-        "",
-        'data: {"message": "### Top 5 "}',
-        "",
-        'data: {"message": "### Top 5 Products by Revenue"}',
-        "",
-        'data: {"topic": "order_items"}',
+        "event: result",
+        'data: {"topic": "order_items", "actions": [',
+        'data: {"type": "generate_query", "message": "Generating the query", "timestamp": "2025-01-15T10:00:10.000Z"},',
+        'data: {"type": "summarize", "message": "Summarizing", "timestamp": "2025-01-15T10:00:20.000Z"}],',
+        'data: "message": "### Top 5 Products by Revenue"}',
         "",
         "data: [DONE]",
         "",
@@ -170,13 +171,7 @@ SSE_BODY = "\n".join(
 
 DOCS_ANSWER: dict[str, Any] = {
     "answer": 'To create a dashboard filter, click the "Add Filter" button...',
-    "sources": [
-        {
-            "title": "Dashboard Filters",
-            "url": "https://docs.example.com/visualize-present/dashboards/filters",
-            "snippet": "Filters narrow the rows a dashboard shows.",
-        }
-    ],
+    "sources": [{"title": "Dashboard Filters", "url": "https://docs.example.com/visualize-present/dashboards/filters"}],
 }
 
 
@@ -224,6 +219,31 @@ class _FakeClient:
             raise self._exc
         assert self._response is not None, "this fake was not given a response"
         return self._response
+
+
+class _Clock:
+    """Fake monotonic clock: every reading advances it by `step` seconds."""
+
+    def __init__(self, step: float = 0.0) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+
+def _patch_clock(monkeypatch: pytest.MonkeyPatch, step: float = 0.0) -> list[float]:
+    """Freeze (or advance) the poll clock and record the sleeps. Returns the sleeps."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("omni_mcp.tools.ai._sleep", _record)
+    monkeypatch.setattr("omni_mcp.tools.ai._monotonic", _Clock(step))
+    return slept
 
 
 def _patch(monkeypatch: pytest.MonkeyPatch, fake: _FakeClient) -> _FakeClient:
@@ -589,6 +609,7 @@ async def test_get_ai_job_result_json_body(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 async def test_get_ai_job_result_parses_sse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A multi-line `data:` event is joined with newlines and decoded as one object."""
     fake = _patch(
         monkeypatch, _FakeClient(response=_FakeResponse(SSE_BODY, content_type="text/event-stream; charset=utf-8"))
     )
@@ -603,8 +624,34 @@ async def test_get_ai_job_result_parses_sse(monkeypatch: pytest.MonkeyPatch) -> 
     assert fake.calls == [("GET", f"/v1/ai/jobs/{JOB_ID}/result", {"timeout": 300.0})]
 
 
-async def test_get_ai_job_result_appends_sse_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = "\n".join(['data: {"message": "Hello "}', 'data: {"message": "world"}', "data: [DONE]"])
+async def test_get_ai_job_result_last_full_sse_object_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial events never mutate the answer; the last complete object is authoritative."""
+    body = "\n".join(
+        [
+            'data: {"message": "partial draft", "actions": []}',
+            "",
+            'data: {"topic": "ignored — not a full result object"}',
+            "",
+            'data: {"message": "final answer", "actions": [], "topic": "order_items"}',
+            "",
+            "data: [DONE]",
+            "",
+            'data: {"message": "sent after DONE and never read"}',
+            "",
+        ]
+    )
+    _patch(monkeypatch, _FakeClient(response=_FakeResponse(body, content_type="text/event-stream")))
+
+    payload = json.loads(
+        await omni_get_ai_job_result(GetAiJobResultInput(job_id=JOB_ID, response_format=ResponseFormat.JSON))
+    )
+
+    assert payload["result"] == {"message": "final answer", "actions": [], "topic": "order_items"}
+
+
+async def test_get_ai_job_result_sse_text_only_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no complete object, raw fragments are concatenated in arrival order."""
+    body = "\n".join(["data: Hello ", "", "data: world", "", "data: [DONE]", ""])
     _patch(monkeypatch, _FakeClient(response=_FakeResponse(body, content_type="text/event-stream")))
 
     payload = json.loads(
@@ -612,6 +659,39 @@ async def test_get_ai_job_result_appends_sse_deltas(monkeypatch: pytest.MonkeyPa
     )
 
     assert payload["result"]["message"] == "Hello world"
+
+
+async def test_get_ai_job_result_sse_keeps_fragments_beside_an_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-JSON fragments are appended to a complete object's message, not dropped."""
+    body = "\n".join(['data: {"message": "The answer.", "actions": []}', "", "data:  Addendum.", "", "data: [DONE]"])
+    _patch(monkeypatch, _FakeClient(response=_FakeResponse(body, content_type="text/event-stream")))
+
+    payload = json.loads(
+        await omni_get_ai_job_result(GetAiJobResultInput(job_id=JOB_ID, response_format=ResponseFormat.JSON))
+    )
+
+    assert payload["result"]["message"] == "The answer. Addendum."
+
+
+async def test_get_ai_job_result_ignores_sse_when_the_body_is_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`application/json` never goes through the SSE fallback, `data:` text or not."""
+    _patch(monkeypatch, _FakeClient(response=_FakeResponse('{"message": "data: not an event"}')))
+
+    payload = json.loads(
+        await omni_get_ai_job_result(GetAiJobResultInput(job_id=JOB_ID, response_format=ResponseFormat.JSON))
+    )
+
+    assert payload["result"] == {"message": "data: not an event"}
+
+
+async def test_get_ai_job_result_renders_a_json_array_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch(monkeypatch, _FakeClient(response=_FakeResponse('[{"a": 1}]')))
+
+    payload = json.loads(
+        await omni_get_ai_job_result(GetAiJobResultInput(job_id=JOB_ID, response_format=ResponseFormat.JSON))
+    )
+
+    assert json.loads(payload["result"]["message"]) == [{"a": 1}]
 
 
 async def test_get_ai_job_result_handles_plain_text_stream(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -661,7 +741,7 @@ async def test_search_omni_docs_markdown(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "Add Filter" in result
     assert "Dashboard Filters" in result
     assert "https://docs.example.com/visualize-present/dashboards/filters" in result
-    assert "Filters narrow the rows" in result
+    assert "Snippet" not in result
     assert fake.calls == [
         ("POST", "/v1/ai/search-omni-docs", {"json_body": {"question": "How do I create a dashboard filter?"}})
     ]
@@ -688,12 +768,7 @@ async def test_ask_ai_polls_twice_then_returns_the_result(monkeypatch: pytest.Mo
             response=_FakeResponse(json.dumps(JOB_RESULT)),
         ),
     )
-    slept: list[float] = []
-
-    async def _record(seconds: float) -> None:
-        slept.append(seconds)
-
-    monkeypatch.setattr("omni_mcp.tools.ai._sleep", _record)
+    slept = _patch_clock(monkeypatch)
 
     result = await omni_ask_ai(AskAiInput(model_id=MODEL_ID, prompt="Top 5 products", topic_name="order_items"))
 
@@ -709,31 +784,44 @@ async def test_ask_ai_polls_twice_then_returns_the_result(monkeypatch: pytest.Mo
                 "json_body": {"modelId": MODEL_ID, "prompt": "Top 5 products", "topicName": "order_items"},
             },
         ),
-        ("GET", f"/v1/ai/jobs/{JOB_ID}", {}),
-        ("GET", f"/v1/ai/jobs/{JOB_ID}", {}),
+        ("GET", f"/v1/ai/jobs/{JOB_ID}", {"timeout": 30.0}),
+        ("GET", f"/v1/ai/jobs/{JOB_ID}", {"timeout": 30.0}),
         ("GET", f"/v1/ai/jobs/{JOB_ID}/result", {"timeout": 120.0}),
     ]
 
 
-async def test_ask_ai_times_out_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_ai_times_out_on_the_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clock advancing 50s per poll exhausts a 120s budget in two polls, not sixty."""
     fake = _patch(monkeypatch, _FakeClient(payloads=[CREATED_JOB, JOB_EXECUTING]))
-    slept: list[float] = []
-
-    async def _record(seconds: float) -> None:
-        slept.append(seconds)
-
-    monkeypatch.setattr("omni_mcp.tools.ai._sleep", _record)
+    slept = _patch_clock(monkeypatch, step=50.0)
 
     result = await omni_ask_ai(
-        AskAiInput(model_id=MODEL_ID, prompt="Top 5 products", poll_interval_seconds=2, max_wait_seconds=5)
+        AskAiInput(model_id=MODEL_ID, prompt="Top 5 products", poll_interval_seconds=2, max_wait_seconds=120)
     )
 
-    assert "did not finish within 5s" in result
+    assert "did not finish within 120s" in result
     assert JOB_ID in result
     assert CONVERSATION_ID in result
     assert "omni_get_ai_job_result" in result
     assert slept == [2.0, 2.0]
-    assert len(fake.calls) == 4
+    # One create + two status polls; the second is clamped to the 20s left.
+    assert len(fake.calls) == 3
+    assert fake.calls[1] == ("GET", f"/v1/ai/jobs/{JOB_ID}", {"timeout": 30.0})
+    assert fake.calls[2] == ("GET", f"/v1/ai/jobs/{JOB_ID}", {"timeout": 20.0})
+
+
+async def test_ask_ai_stops_at_the_poll_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even with a stopped clock and a long budget, the request count is capped."""
+    fake = _patch(monkeypatch, _FakeClient(payloads=[CREATED_JOB, JOB_EXECUTING]))
+    slept = _patch_clock(monkeypatch)
+
+    result = await omni_ask_ai(
+        AskAiInput(model_id=MODEL_ID, prompt="Top 5 products", poll_interval_seconds=2, max_wait_seconds=900)
+    )
+
+    assert f"did not finish after {MAX_POLL_ATTEMPTS} status polls" in result
+    assert len(fake.calls) == MAX_POLL_ATTEMPTS + 1
+    assert len(slept) == MAX_POLL_ATTEMPTS
 
 
 async def test_ask_ai_reports_a_failed_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -852,9 +940,10 @@ def test_attachment_count_bound() -> None:
 
 def test_ask_ai_poll_bounds() -> None:
     with pytest.raises(ValueError):
-        AskAiInput(model_id=MODEL_ID, prompt="p", poll_interval_seconds=0.5)
+        AskAiInput(model_id=MODEL_ID, prompt="p", poll_interval_seconds=1)
     with pytest.raises(ValueError):
         AskAiInput(model_id=MODEL_ID, prompt="p", poll_interval_seconds=31)
+    assert AskAiInput(model_id=MODEL_ID, prompt="p", poll_interval_seconds=2).poll_interval_seconds == 2
     with pytest.raises(ValueError):
         AskAiInput(model_id=MODEL_ID, prompt="p", max_wait_seconds=1)
     with pytest.raises(ValueError):
