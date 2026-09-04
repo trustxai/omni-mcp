@@ -16,7 +16,7 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from omni_mcp.client import get_client
 from omni_mcp.errors import handle_api_error
@@ -87,16 +87,32 @@ def _environment_kind(env: Mapping[str, Any]) -> str:
     return "shared" if owner_id is None else f"personal (owner `{owner_id}`)"
 
 
+def _format_variables_inline(variables: Any) -> str:
+    """Render `name`=`value` pairs for markdown. Callers must pass already-masked variables."""
+    if not isinstance(variables, list) or not variables:
+        return "none"
+    parts: list[str] = []
+    for var in variables:
+        if not isinstance(var, dict):
+            continue
+        name = var.get("name", "unnamed")
+        value = var.get("value")
+        parts.append(f"`{name}`=`{value}`" if value is not None else f"`{name}`=`(unset)`")
+    return ", ".join(parts) if parts else "none"
+
+
 def _format_environment_item(env: Mapping[str, Any]) -> str:
+    """Render one environment. `env` must already be masked (see `_mask_environment`)."""
     tags = []
     if env.get("isDefaultEnvironment"):
         tags.append("default")
     if env.get("isDeferralEnabled"):
         tags.append("deferral enabled")
     tag_text = f" — {', '.join(tags)}" if tags else ""
+    variables_text = _format_variables_inline(env.get("variables"))
     return (
         f"- **{env.get('name', 'unnamed')}** (`{env.get('id')}`) — target schema `{env.get('targetSchema')}`, "
-        f"{_environment_kind(env)}{tag_text}"
+        f"{_environment_kind(env)}{tag_text} — variables: {variables_text}"
     )
 
 
@@ -132,9 +148,10 @@ def _format_dbt_configuration_markdown(connection_id: str, body: Mapping[str, An
 
 def _format_exposure_item(record: Mapping[str, Any]) -> str:
     dashboard_id = record.get("dashboard_identifier", "unknown")
+    dedup_name = record.get("deduplication_name", "unknown")
     exposure = record.get("exposure")
     if not isinstance(exposure, dict):
-        return f"- Dashboard `{dashboard_id}` — no dbt models referenced (exposure is null)."
+        return f"- Dashboard `{dashboard_id}` (dedup `{dedup_name}`) — no dbt models referenced (exposure is null)."
     name = exposure.get("name", "unnamed")
     label = exposure.get("label", name)
     url = exposure.get("url", "")
@@ -143,7 +160,8 @@ def _format_exposure_item(record: Mapping[str, Any]) -> str:
     owner_text = f"{owner.get('name', 'unknown')} <{owner.get('email', 'unknown')}>"
     depends_text = ", ".join(str(item) for item in depends_on) if depends_on else "none"
     return (
-        f"- **{label}** (`{name}`) — dashboard `{dashboard_id}`, owner {owner_text}, depends on: {depends_text} ({url})"
+        f"- **{label}** (`{name}`) — dashboard `{dashboard_id}` (dedup `{dedup_name}`), owner {owner_text}, "
+        f"depends on: {depends_text} ({url})"
     )
 
 
@@ -481,9 +499,17 @@ class CreateDbtEnvironmentInput(BaseModel):
     owner_id: str | None = Field(
         default=None,
         description=(
-            "Determines the environment type. Set to the ID of a user to create a **personal** environment "
-            "(Organization Admin permissions are required to set an ID other than the caller's own); omit to "
-            "create a **shared** environment (requires Connection Admin or Organization Admin permissions)."
+            "Set to the ID of a user to create a **personal** environment owned by that user (Organization Admin "
+            "permissions are required to set an ID other than the caller's own). Mutually exclusive with `shared`."
+        ),
+    )
+    shared: bool = Field(
+        default=False,
+        description=(
+            "Set true to explicitly create a **shared** environment — per the API, this sends `ownerId: null` "
+            "(requires Connection Admin or Organization Admin permissions). Mutually exclusive with `owner_id`. "
+            "If neither `owner_id` nor `shared` is set, `ownerId` is omitted from the request entirely and the "
+            "API decides; pass `shared=true` explicitly when a shared environment is what you want."
         ),
     )
     target_database: str | None = Field(default=None, description="Target database override.")
@@ -508,6 +534,12 @@ class CreateDbtEnvironmentInput(BaseModel):
             _require_new_variable(var, index)
         return value
 
+    @model_validator(mode="after")
+    def _validate_owner_exclusivity(self) -> CreateDbtEnvironmentInput:
+        if self.owner_id is not None and self.shared:
+            raise ValueError("owner_id and shared are mutually exclusive — set at most one")
+        return self
+
 
 @mcp.tool(
     name="omni_create_dbt_environment",
@@ -524,9 +556,11 @@ async def omni_create_dbt_environment(params: CreateDbtEnvironmentInput) -> str:
 
     A dbt environment connects Omni to a specific dbt project/target within the
     connection. Environments can be personal (owned by one user, via `owner_id`)
-    or shared (`owner_id` omitted). Permission requirements differ by kind:
-    creating a personal environment for yourself needs Restricted Querier or
-    higher on the associated model; a personal environment for someone else needs
+    or shared (`shared=true`, which sends `ownerId: null` as the API's documented
+    shared-environment convention). `owner_id` and `shared` are mutually
+    exclusive. Permission requirements differ by kind: creating a personal
+    environment for yourself needs Restricted Querier or higher on the
+    associated model; a personal environment for someone else needs
     Organization Admin; a shared environment needs Connection Admin or
     Organization Admin.
 
@@ -548,7 +582,7 @@ async def omni_create_dbt_environment(params: CreateDbtEnvironmentInput) -> str:
 
     Examples:
     - `{"params": {"connection_id": "550e8400-e29b-41d4-a716-446655440000", "name": "Production dbt", \
-"target_schema": "analytics"}}`
+"target_schema": "analytics", "shared": true}}`
     - `{"params": {"connection_id": "550e8400-e29b-41d4-a716-446655440000", "name": "My dev env", \
 "target_schema": "analytics_dev", "owner_id": "550e8400-e29b-41d4-a716-446655440000", \
 "variables": [{"name": "DBT_TARGET", "value": "dev", "isSecret": false}]}}`
@@ -567,6 +601,8 @@ async def omni_create_dbt_environment(params: CreateDbtEnvironmentInput) -> str:
             body["isDeferralEnabled"] = params.is_deferral_enabled
         if params.owner_id is not None:
             body["ownerId"] = params.owner_id
+        elif params.shared:
+            body["ownerId"] = None
         if params.target_database is not None:
             body["targetDatabase"] = params.target_database
         if params.target_name is not None:
@@ -623,7 +659,7 @@ async def omni_list_dbt_environments(params: ListDbtEnvironmentsInput) -> str:
 
     When to Use:
     - To find an environment's id before calling `omni_update_dbt_environment`,
-      `omni_delete_dbt_environment`, or `omni_set_dbt_environment_on_model_branch`.
+      `omni_delete_dbt_environment`, or `omni_update_model_branch_dbt_environment`.
     - To audit which environments exist, which is the default, and who owns each.
 
     When NOT to Use:
@@ -697,8 +733,29 @@ class UpdateDbtEnvironmentInput(BaseModel):
         ),
     )
     target_database: str | None = Field(default=None, description="New target database override.")
+    clear_target_database: bool = Field(
+        default=False,
+        description=(
+            "Set true to explicitly clear the target database override (send `targetDatabase: null`), reverting "
+            "to the connection's default. Ignored if `target_database` is also set."
+        ),
+    )
     target_name: str | None = Field(default=None, description="New target name override.")
+    clear_target_name: bool = Field(
+        default=False,
+        description=(
+            "Set true to explicitly clear the target name override (send `targetName: null`), reverting to the "
+            "connection's default. Ignored if `target_name` is also set."
+        ),
+    )
     target_role: str | None = Field(default=None, description="New target role override.")
+    clear_target_role: bool = Field(
+        default=False,
+        description=(
+            "Set true to explicitly clear the target role override (send `targetRole: null`), reverting to the "
+            "connection's default. Ignored if `target_role` is also set."
+        ),
+    )
     variables: list[dict[str, Any]] | None = Field(
         default=None,
         description=(
@@ -735,10 +792,16 @@ def _build_update_environment_body(params: UpdateDbtEnvironmentInput) -> dict[st
         body["ownerId"] = None
     if params.target_database is not None:
         body["targetDatabase"] = params.target_database
+    elif params.clear_target_database:
+        body["targetDatabase"] = None
     if params.target_name is not None:
         body["targetName"] = params.target_name
+    elif params.clear_target_name:
+        body["targetName"] = None
     if params.target_role is not None:
         body["targetRole"] = params.target_role
+    elif params.clear_target_role:
+        body["targetRole"] = None
     if params.variables is not None:
         body["variables"] = params.variables
     return body
@@ -759,8 +822,11 @@ async def omni_update_dbt_environment(params: UpdateDbtEnvironmentInput) -> str:
 
     Every field is optional — only the fields you provide are changed. To
     convert a personal environment to shared (or vice versa), see `owner_id` and
-    `clear_owner`. Variables can be added (omit `id`) or updated in place
-    (include the existing `id`).
+    `clear_owner`. The `target_database`/`target_name`/`target_role` overrides
+    are nullable in the API; use `clear_target_database`/`clear_target_name`/
+    `clear_target_role` to explicitly reset one to the connection's default
+    instead of leaving it unchanged. Variables can be added (omit `id`) or
+    updated in place (include the existing `id`).
 
     When to Use:
     - To rename an environment, change its target schema, or toggle deferral.
@@ -834,7 +900,7 @@ async def omni_delete_dbt_environment(params: DeleteDbtEnvironmentInput) -> str:
     """Delete a dbt environment from a connection. This action cannot be undone.
 
     Any model branch currently set to use this environment (via
-    `omni_set_dbt_environment_on_model_branch`) will need to be repointed at a
+    `omni_update_model_branch_dbt_environment`) will need to be repointed at a
     different environment afterward.
 
     When to Use:
@@ -967,8 +1033,8 @@ async def omni_get_dbt_exposures(params: GetDbtExposuresInput) -> str:
 # --------------------------------------------------------------------------- #
 
 
-class SetDbtEnvironmentOnModelBranchInput(BaseModel):
-    """Input for `omni_set_dbt_environment_on_model_branch`."""
+class UpdateModelBranchDbtEnvironmentInput(BaseModel):
+    """Input for `omni_update_model_branch_dbt_environment`."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -985,17 +1051,17 @@ class SetDbtEnvironmentOnModelBranchInput(BaseModel):
 
 
 @mcp.tool(
-    name="omni_set_dbt_environment_on_model_branch",
+    name="omni_update_model_branch_dbt_environment",
     annotations=ToolAnnotations(
-        title="Set dbt Environment on Model Branch",
+        title="Update Model Branch dbt Environment",
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
     ),
 )
-async def omni_set_dbt_environment_on_model_branch(params: SetDbtEnvironmentOnModelBranchInput) -> str:
-    """Set the active dbt environment on a model branch.
+async def omni_update_model_branch_dbt_environment(params: UpdateModelBranchDbtEnvironmentInput) -> str:
+    """Update the active dbt environment on a model branch.
 
     Model branches are Omni's working-copy mechanism for iterating on a model
     (e.g. a developer's feature branch, or a branch a CI pipeline checks out)

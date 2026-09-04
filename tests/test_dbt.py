@@ -17,18 +17,18 @@ from omni_mcp.tools.dbt import (
     GetDbtConfigurationInput,
     GetDbtExposuresInput,
     ListDbtEnvironmentsInput,
-    SetDbtEnvironmentOnModelBranchInput,
     UpdateDbtConfigurationInput,
     UpdateDbtEnvironmentInput,
+    UpdateModelBranchDbtEnvironmentInput,
     omni_create_dbt_environment,
     omni_delete_dbt_configuration,
     omni_delete_dbt_environment,
     omni_get_dbt_configuration,
     omni_get_dbt_exposures,
     omni_list_dbt_environments,
-    omni_set_dbt_environment_on_model_branch,
     omni_update_dbt_configuration,
     omni_update_dbt_environment,
+    omni_update_model_branch_dbt_environment,
 )
 
 CONNECTION_ID = "550e8400-e29b-41d4-a716-446655440000"
@@ -348,6 +348,36 @@ async def test_create_dbt_environment_with_owner_and_variables(monkeypatch: pyte
     assert kwargs["json_body"]["variables"] == [{"name": "DBT_TARGET", "value": "dev", "isSecret": False}]
 
 
+async def test_create_dbt_environment_shared_sends_null_owner_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload=DEFAULT_ENVIRONMENT)
+    monkeypatch.setattr("omni_mcp.tools.dbt.get_client", lambda: fake)
+
+    result = await omni_create_dbt_environment(
+        CreateDbtEnvironmentInput(
+            connection_id=CONNECTION_ID, name="Production dbt", target_schema="analytics", shared=True
+        )
+    )
+
+    assert "shared" in result
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"] == {
+        "name": "Production dbt",
+        "targetSchema": "analytics",
+        "ownerId": None,
+    }
+
+
+def test_create_dbt_environment_rejects_owner_id_and_shared_together() -> None:
+    with pytest.raises(ValidationError):
+        CreateDbtEnvironmentInput(
+            connection_id=CONNECTION_ID,
+            name="Env",
+            target_schema="analytics",
+            owner_id="550e8400-e29b-41d4-a716-446655440001",
+            shared=True,
+        )
+
+
 def test_create_dbt_environment_rejects_incomplete_variable() -> None:
     with pytest.raises(ValidationError):
         CreateDbtEnvironmentInput(
@@ -387,8 +417,8 @@ async def test_list_dbt_environments_markdown(monkeypatch: pytest.MonkeyPatch) -
 
     assert "Production" in result
     assert "Development" in result
-    assert "dev" in result  # non-secret variable value survives
-    assert "DBT_API_KEY" not in result or "***" in result
+    assert "`DBT_TARGET`=`dev`" in result  # non-secret variable value rendered
+    assert "`DBT_API_KEY`=`***`" in result  # secret variable value masked, never the raw value
     assert fake.calls == [("GET", f"/v1/connections/{CONNECTION_ID}/dbt/environments", {})]
 
 
@@ -476,6 +506,39 @@ async def test_update_dbt_environment_owner_id_takes_precedence_over_clear(monke
 
     _, _, kwargs = fake.calls[0]
     assert kwargs["json_body"] == {"ownerId": owner_id}
+
+
+async def test_update_dbt_environment_clear_target_database_sends_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload=ENVIRONMENT)
+    monkeypatch.setattr("omni_mcp.tools.dbt.get_client", lambda: fake)
+
+    await omni_update_dbt_environment(
+        UpdateDbtEnvironmentInput(
+            connection_id=CONNECTION_ID, environment_id=ENVIRONMENT_ID, clear_target_database=True
+        )
+    )
+
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"] == {"targetDatabase": None}
+
+
+async def test_update_dbt_environment_target_database_takes_precedence_over_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeClient(payload=ENVIRONMENT)
+    monkeypatch.setattr("omni_mcp.tools.dbt.get_client", lambda: fake)
+
+    await omni_update_dbt_environment(
+        UpdateDbtEnvironmentInput(
+            connection_id=CONNECTION_ID,
+            environment_id=ENVIRONMENT_ID,
+            target_database="analytics_dev",
+            clear_target_database=True,
+        )
+    )
+
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"] == {"targetDatabase": "analytics_dev"}
 
 
 async def test_update_dbt_environment_no_fields_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -583,7 +646,9 @@ async def test_get_dbt_exposures_markdown(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert "Sales Overview" in result
     assert "Blob Ross" in result
+    assert "sales_overview_abc123" in result  # deduplication_name for the populated exposure
     assert "no dbt models referenced" in result
+    assert "empty_dash_def456" in result  # deduplication_name for the null exposure
     assert 'cursor="cursor-2"' in result
     assert fake.calls == [("GET", f"/v1/models/{MODEL_ID}/dbt-exposures", {"params": {"pageSize": 20}})]
 
@@ -634,17 +699,17 @@ async def test_get_dbt_exposures_error_path(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # --------------------------------------------------------------------------- #
-# omni_set_dbt_environment_on_model_branch
+# omni_update_model_branch_dbt_environment
 # --------------------------------------------------------------------------- #
 
 
-async def test_set_dbt_environment_on_model_branch_success(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_model_branch_dbt_environment_success(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(payload={"success": True})
     monkeypatch.setattr("omni_mcp.tools.dbt.get_client", lambda: fake)
     env_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
 
-    result = await omni_set_dbt_environment_on_model_branch(
-        SetDbtEnvironmentOnModelBranchInput(
+    result = await omni_update_model_branch_dbt_environment(
+        UpdateModelBranchDbtEnvironmentInput(
             model_id=MODEL_ID, branch_name="feature/new-models", dbt_environment_id=env_id
         )
     )
@@ -660,13 +725,13 @@ async def test_set_dbt_environment_on_model_branch_success(monkeypatch: pytest.M
     ]
 
 
-async def test_set_dbt_environment_on_model_branch_with_git_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_model_branch_dbt_environment_with_git_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(payload={"success": True})
     monkeypatch.setattr("omni_mcp.tools.dbt.get_client", lambda: fake)
     env_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
 
-    result = await omni_set_dbt_environment_on_model_branch(
-        SetDbtEnvironmentOnModelBranchInput(
+    result = await omni_update_model_branch_dbt_environment(
+        UpdateModelBranchDbtEnvironmentInput(
             model_id=MODEL_ID, branch_name="main", dbt_environment_id=env_id, dbt_git_branch="feature/branch"
         )
     )
@@ -676,12 +741,12 @@ async def test_set_dbt_environment_on_model_branch_with_git_branch(monkeypatch: 
     assert kwargs["json_body"] == {"dbt_environment_id": env_id, "dbt_git_branch": "feature/branch"}
 
 
-async def test_set_dbt_environment_on_model_branch_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_model_branch_dbt_environment_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(exc=_http_error(404, "dbt environment not found"))
     monkeypatch.setattr("omni_mcp.tools.dbt.get_client", lambda: fake)
 
-    result = await omni_set_dbt_environment_on_model_branch(
-        SetDbtEnvironmentOnModelBranchInput(model_id=MODEL_ID, branch_name="main", dbt_environment_id="missing-env")
+    result = await omni_update_model_branch_dbt_environment(
+        UpdateModelBranchDbtEnvironmentInput(model_id=MODEL_ID, branch_name="main", dbt_environment_id="missing-env")
     )
 
     assert result.startswith("Error (404):")
@@ -698,7 +763,7 @@ def test_inputs_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         ListDbtEnvironmentsInput(connection_id=CONNECTION_ID, unexpected="x")  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        SetDbtEnvironmentOnModelBranchInput(
+        UpdateModelBranchDbtEnvironmentInput(
             model_id=MODEL_ID,
             branch_name="main",
             dbt_environment_id="x",
