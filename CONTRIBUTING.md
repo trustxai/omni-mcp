@@ -25,7 +25,8 @@ src/omni_mcp/
   tools/__init__.py  register_all(): imports every tool module (no arguments)
   tools/<area>.py    one module per API area — where your tools go
 tests/test_<area>.py one test file per tool module
-scripts/tool_table.py generates the README tool table
+docs/               README long-form companions (TOOLS.md, comparison.md)
+scripts/tool_table.py generates docs/TOOLS.md and the README summary
 ```
 
 `tools/__init__.py` already lists **every** module, so two people can implement different areas at
@@ -35,13 +36,41 @@ not edit another area's module.
 
 ## The tool contract
 
-1. **Naming.** Tool names are `omni_<verb>_<noun>`: `omni_list_users`, `omni_get_model`,
+1. **Naming.** Tool names are `omni_<verb>_<noun>`: `omni_list_users`, `omni_get_model_yaml`,
    `omni_create_folder`, `omni_delete_schedule`. Lower snake case, always the `omni_` prefix (it is
-   enforced by `tests/test_server.py`), and the same verb vocabulary throughout:
-   `list`, `get`, `search`, `create`, `update`, `delete`, `run`, `validate`.
+   enforced by `tests/test_server.py`), and the same verb vocabulary throughout.
+
+   **CRUD endpoints use CRUD verbs**: `list`, `get`, `search`, `create`, `update`, `replace`,
+   `delete`. **Action endpoints use the API's own verb** — do not translate an action into a CRUD
+   verb, because the API's word is what a model will be looking for:
+
+   > `pause`, `resume`, `trigger`, `publish`, `archive`, `restore`, `grant`, `revoke`, `assign`,
+   > `replace`, `sync`, `merge`, `migrate`, `validate`, `refresh`, `reset`, `upload`, `download`,
+   > `export`, `import`, `generate`, `dismiss`, `enable`, `disable`, `wait`, `ask`
+
+   So: `omni_pause_schedule`, not `omni_update_schedule_state`; `omni_merge_model_branch`, not
+   `omni_update_model_branch`; `omni_revoke_folder_permissions`, not `omni_delete_folder_permissions`.
+   `update` is a partial change (`PATCH`); `replace` is a whole-resource write (`PUT`).
 2. **One pydantic input model per tool**, named `<ToolName>Input`, with
    `model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")` and a `Field(description=…)`
    on every field. Snake-case field names map to the API's camelCase query params in the tool body.
+
+   **Credential and content fields opt out of stripping.** `str_strip_whitespace=True` is right for
+   ids and names and wrong for anything whose bytes are the payload — passwords, deploy private
+   keys (a PEM's trailing newline is load-bearing), CSV content, YAML content (its trailing newline
+   is part of the checksum). Exempt those fields individually:
+
+   ```python
+   from typing import Annotated
+
+   from pydantic import StringConstraints
+
+   deploy_private_key: Annotated[str, StringConstraints(strip_whitespace=False)] | None = Field(
+       default=None, description="PEM-encoded deploy key. Never echoed back."
+   )
+   ```
+
+   Silently trimming one of these corrupts the request in a way the caller cannot see.
 3. **Signature.** `async def omni_<verb>_<noun>(params: <ToolName>Input) -> str:` — always a single
    `params` argument, always a `str` return.
 4. **Annotations.** Every tool passes `ToolAnnotations` with `title`, `readOnlyHint`,
@@ -51,7 +80,7 @@ not edit another area's module.
    destructiveHint=False`, with `idempotentHint=True` only for genuine PUT-style upserts.
    `openWorldHint=True` for anything that calls the API.
 5. **Docstring sections**, in this order: a one-line summary (it becomes the tool's description in
-   the README table), then `When to Use`, `When NOT to Use`, `Returns`, `Examples`, `Error Handling`.
+   the generated `docs/TOOLS.md` reference), then `When to Use`, `When NOT to Use`, `Returns`, `Examples`, `Error Handling`.
    Write them for a model deciding which tool to call, not for a human reading source.
 6. **Never raise.** Wrap the whole body in `try: … except Exception as exc: return handle_api_error(exc)`.
 7. **`response_format`** on read tools: a `ResponseFormat` field defaulting to
@@ -60,11 +89,44 @@ not edit another area's module.
    `Created folder **Marketing** (id `abc123`).` — not a dump of the response body.
 9. **List tools expose `page_size` and `cursor`** and render through `cursor_paginated_response`,
    which prints the next cursor so the caller can page. Never loop over pages inside a tool.
-10. **Stay under the 1 MB tool-result limit**: every result goes through `truncate_result`, which
+
+   **Not every list paginates the same way**, and the spec is the authority:
+   - **SCIM endpoints** (`/scim/v2/Users`, `/scim/v2/Groups`) use **offset** pagination —
+     `startIndex` (1-based) and `count`, answering with `totalResults`/`itemsPerPage`, not a
+     cursor. Expose those parameter names as they are and render through the module-local SCIM
+     list helper; do not invent a cursor on top.
+   - **Some lists are bare arrays** with no `pageInfo` at all (eval prompt sets, eval runs, labels).
+     Render them with `cursor_paginated_response(..., page_info=None)`, which prints the items and
+     no pagination hint, or with a small module-local helper when the shape needs it. Never fake a
+     `pageInfo`.
+10. **Raw-body overrides are named `body`.** When an endpoint's schema is too open to model
+    field-by-field, add one optional escape hatch called `body: dict[str, Any] | None`, sent to the
+    API verbatim. Two rules keep it honest: it only wins when **no typed field is set**, and mixing
+    it with typed fields is **rejected in a `model_validator`** rather than resolved silently —
+    a caller who sets both has a bug, and a silent winner hides it. Say so in the field
+    description, and keep the tool's own client-side guards documented as skipped on this path.
+11. **Long-running operations poll against a monotonic deadline.** Convenience tools that wait
+    (`omni_ask_ai`, `omni_export_dashboard_file`, `omni_wait_for_query_results`) must:
+    - measure the budget with `time.monotonic()`, through **injectable module-level `_monotonic`
+      and `_sleep`** so tests drive the clock instead of sleeping;
+    - **clamp the per-request timeout to the remaining budget** — one slow request must not
+      overshoot the wall-clock budget the caller asked for;
+    - **cap the poll count** as well as the deadline, so a pathological fast-failing endpoint
+      cannot spin;
+    - on timeout, return the **job id** and whatever else resumes the wait, not an error — the
+      caller continues with the status/result tools.
+12. **Binary downloads are written to a file, never into the result.** Use
+    `get_client().request(..., headers={"accept": "*/*"})` (the JSON default would make the API
+    negotiate the wrong content type), write `response.content` to the caller's `output_path`,
+    and return a confirmation with the path and byte count. Refuse to overwrite an existing file
+    unless the caller passed `overwrite=True`, and reject `overwrite=True` without an
+    `output_path`. A tool that writes a local file is not read-only: `readOnlyHint=False`,
+    `destructiveHint=False`.
+13. **Stay under the 1 MB tool-result limit**: every result goes through `truncate_result`, which
     budgets in UTF-8 **bytes** (`cursor_paginated_response` and `format_arrow_result` already do it
     for you).
-11. **Never print to stdout** — stdout is the MCP channel. Use `logging` to stderr if you must.
-12. **Never echo secrets.** Report whether a key is configured, never the key itself.
+14. **Never print to stdout** — stdout is the MCP channel. Use `logging` to stderr if you must.
+15. **Never echo secrets.** Report whether a key is configured, never the key itself.
 
 ### Template
 
@@ -201,8 +263,8 @@ Before pushing, everything below must pass:
 
 ```bash
 uv run pytest -m "not live"
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
+uv run ruff check src/ tests/ scripts/
+uv run ruff format --check src/ tests/ scripts/
 uv run mypy src/
 uv run python -c "from omni_mcp.server import mcp; print('import ok')"
 uv run python scripts/tool_table.py
@@ -240,14 +302,18 @@ With only the first entry the normal release path works and the manual fallback 
 `uv publish` with an OIDC/"not a trusted publisher" error — at exactly the moment it is needed.
 Before the first release, add both as *pending* publishers (the project does not exist on PyPI yet).
 
-## README tool table
+## The tool reference
 
-The `Tools` section of the README is generated:
+`docs/TOOLS.md` is generated — regenerate it whenever you add, rename or re-describe a tool:
 
 ```bash
 uv run python scripts/tool_table.py
 ```
 
-Paste the output between the `<!-- TOOL_TABLE_START -->` and `<!-- TOOL_TABLE_END -->` markers. The
-script exits non-zero (printing nothing) when a tool's registered `name=` does not match the
+Paste the output verbatim under the header in `docs/TOOLS.md`, keeping the generator's format
+byte-for-byte. Then update the compact per-module summary in the README between the
+`<!-- TOOL_TABLE_START -->` and `<!-- TOOL_TABLE_END -->` markers — the totals and your module's
+row need to match the numbers the generator just printed.
+
+The script exits non-zero (printing nothing) when a tool's registered `name=` does not match the
 function implementing it, since that tool could not be attributed to a module.
