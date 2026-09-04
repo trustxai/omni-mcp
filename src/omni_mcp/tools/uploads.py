@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from omni_mcp.client import get_client
 from omni_mcp.errors import handle_api_error
@@ -39,14 +39,25 @@ class SortDirection(StrEnum):
     DESC = "desc"
 
 
+#: `csv_content` opts out of the model-level `str_strip_whitespace=True` — stripping it would
+#: silently mutate real CSV data (a leading space in a header cell, trailing spaces in the last
+#: cell of the file).
+_UnstrippedStr = Annotated[str, StringConstraints(strip_whitespace=False)]
+
+
 def _read_csv_payload(file_path: str | None, csv_content: str | None, filename: str | None) -> tuple[str, bytes]:
     """Resolve the `(filename, bytes)` pair sent as the multipart `file` part.
 
-    The input model's validator guarantees exactly one of `file_path`/`csv_content` is set.
+    The input model's validator guarantees exactly one of `file_path`/`csv_content` is set, and that
+    `csv_content` (when given) is not empty/whitespace-only.
     """
     if file_path is not None:
         path = Path(file_path).expanduser()
-        content = path.read_bytes()
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            raise RuntimeError(f"cannot read file {file_path}: {reason}") from exc
         name = filename or path.name or "upload.csv"
         return name, content
     name = filename or "upload.csv"
@@ -86,15 +97,17 @@ class UploadCsvInput(BaseModel):
         description="Path to a local CSV file to upload (must have a `.csv` extension). Mutually exclusive "
         "with `csv_content`; exactly one of the two is required.",
     )
-    csv_content: str | None = Field(
+    csv_content: _UnstrippedStr | None = Field(
         default=None,
         description="Inline CSV text to upload. Mutually exclusive with `file_path`; exactly one of the two "
-        "is required.",
+        "is required, and it must not be empty or whitespace-only. Sent byte-for-byte — leading/trailing "
+        "whitespace is preserved, unlike other string fields on this tool.",
     )
     filename: str | None = Field(
         default=None,
-        description="File name recorded for the upload when using `csv_content` (default `upload.csv`). "
-        "Ignored when `file_path` is set — the path's basename is used instead.",
+        description="File name recorded for the upload. Defaults to the `file_path` basename when `file_path` "
+        "is set, or to `upload.csv` when using `csv_content`. An explicit value here always overrides that "
+        "default, including alongside `file_path`.",
     )
     branch_id: str | None = Field(
         default=None,
@@ -112,6 +125,8 @@ class UploadCsvInput(BaseModel):
     def _validate_source_and_branch(self) -> UploadCsvInput:
         if (self.file_path is None) == (self.csv_content is None):
             raise ValueError("Provide exactly one of `file_path` or `csv_content`.")
+        if self.csv_content is not None and not self.csv_content.strip():
+            raise ValueError("`csv_content` must not be empty or whitespace-only.")
         if self.branch_id is not None and self.branch_name is not None:
             raise ValueError("Provide at most one of `branch_id` or `branch_name`; they are mutually exclusive.")
         return self
@@ -128,21 +143,25 @@ class ReplaceUploadDataInput(BaseModel):
         description="Path to the local replacement CSV file (must have a `.csv` extension). Mutually "
         "exclusive with `csv_content`; exactly one of the two is required.",
     )
-    csv_content: str | None = Field(
+    csv_content: _UnstrippedStr | None = Field(
         default=None,
         description="Inline replacement CSV text. Mutually exclusive with `file_path`; exactly one of the "
-        "two is required.",
+        "two is required, and it must not be empty or whitespace-only. Sent byte-for-byte — "
+        "leading/trailing whitespace is preserved, unlike other string fields on this tool.",
     )
     filename: str | None = Field(
         default=None,
-        description="File name recorded for the replacement when using `csv_content` (default `upload.csv`). "
-        "Ignored when `file_path` is set — the path's basename is used instead.",
+        description="File name recorded for the replacement. Defaults to the `file_path` basename when "
+        "`file_path` is set, or to `upload.csv` when using `csv_content`. An explicit value here always "
+        "overrides that default, including alongside `file_path`.",
     )
 
     @model_validator(mode="after")
     def _validate_source(self) -> ReplaceUploadDataInput:
         if (self.file_path is None) == (self.csv_content is None):
             raise ValueError("Provide exactly one of `file_path` or `csv_content`.")
+        if self.csv_content is not None and not self.csv_content.strip():
+            raise ValueError("`csv_content` must not be empty or whitespace-only.")
         return self
 
 

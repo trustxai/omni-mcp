@@ -226,8 +226,8 @@ async def test_upload_csv_from_inline_content_with_optional_fields(monkeypatch: 
     }
     filename, content, content_type = kwargs["files"]["file"]
     assert filename == "inline.csv"
-    # `str_strip_whitespace=True` strips the outer whitespace of `csv_content` like any other string field.
-    assert content == b"id,name\n1,Ada"
+    # `csv_content` opts out of `str_strip_whitespace=True` — its bytes must reach the API untouched.
+    assert content == b"id,name\n1,Ada\n"
     assert content_type == "text/csv"
 
 
@@ -239,6 +239,28 @@ async def test_upload_csv_default_filename_for_inline_content(monkeypatch: pytes
 
     filename, _content, _content_type = fake.calls[0][2]["files"]["file"]
     assert filename == "upload.csv"
+
+
+async def test_upload_csv_preserves_csv_content_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload=UPLOAD_RESPONSE)
+    monkeypatch.setattr("omni_mcp.tools.uploads.get_client", lambda: fake)
+    # Leading space in the header cell, trailing spaces in the last cell/line: `csv_content` opts out
+    # of `str_strip_whitespace=True`, so none of this may be stripped before it reaches the API.
+    csv_text = " id,name\n1,Ada  \n"
+
+    await omni_upload_csv(UploadCsvInput(model_id="model-1", csv_content=csv_text))
+
+    _filename, content, _content_type = fake.calls[0][2]["files"]["file"]
+    assert content == csv_text.encode("utf-8")
+
+
+async def test_upload_csv_missing_file_reports_clear_error(tmp_path: Any) -> None:
+    missing = tmp_path / "does_not_exist.csv"
+
+    result = await omni_upload_csv(UploadCsvInput(model_id="model-1", file_path=str(missing)))
+
+    assert result.startswith("Error: cannot read file")
+    assert str(missing) in result
 
 
 async def test_upload_csv_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,6 +282,11 @@ def test_upload_csv_requires_exactly_one_source() -> None:
 def test_upload_csv_rejects_both_branch_fields() -> None:
     with pytest.raises(ValidationError):
         UploadCsvInput(model_id="model-1", csv_content="a,b\n1,2\n", branch_id="branch-1", branch_name="branch-2")
+
+
+def test_upload_csv_rejects_whitespace_only_content() -> None:
+    with pytest.raises(ValidationError):
+        UploadCsvInput(model_id="model-1", csv_content="   ")
 
 
 def test_upload_csv_rejects_unknown_fields() -> None:
@@ -309,9 +336,35 @@ async def test_replace_upload_data_from_inline_content(monkeypatch: pytest.Monke
     assert (method, path) == ("PUT", "/v1/uploads/550e8400-e29b-41d4-a716-446655440000")
     filename, content, content_type = kwargs["files"]["file"]
     assert filename == "replacement.csv"
-    # `str_strip_whitespace=True` strips the outer whitespace of `csv_content` like any other string field.
-    assert content == b"id,name\n1,Ada\n2,Grace"
+    # `csv_content` opts out of `str_strip_whitespace=True` — its bytes must reach the API untouched.
+    assert content == b"id,name\n1,Ada\n2,Grace\n"
     assert content_type == "text/csv"
+
+
+async def test_replace_upload_data_preserves_csv_content_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload=REPLACE_RESPONSE)
+    monkeypatch.setattr("omni_mcp.tools.uploads.get_client", lambda: fake)
+    # Leading space in the header cell, trailing spaces in the last cell/line: `csv_content` opts out
+    # of `str_strip_whitespace=True`, so none of this may be stripped before it reaches the API.
+    csv_text = " id,name\n1,Ada  \n"
+
+    await omni_replace_upload_data(
+        ReplaceUploadDataInput(upload_id="550e8400-e29b-41d4-a716-446655440000", csv_content=csv_text)
+    )
+
+    _filename, content, _content_type = fake.calls[0][2]["files"]["file"]
+    assert content == csv_text.encode("utf-8")
+
+
+async def test_replace_upload_data_missing_file_reports_clear_error(tmp_path: Any) -> None:
+    missing = tmp_path / "does_not_exist.csv"
+
+    result = await omni_replace_upload_data(
+        ReplaceUploadDataInput(upload_id="550e8400-e29b-41d4-a716-446655440000", file_path=str(missing))
+    )
+
+    assert result.startswith("Error: cannot read file")
+    assert str(missing) in result
 
 
 async def test_replace_upload_data_quotes_path_param(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,6 +393,11 @@ def test_replace_upload_data_requires_exactly_one_source() -> None:
         ReplaceUploadDataInput(upload_id="upload-1")
     with pytest.raises(ValidationError):
         ReplaceUploadDataInput(upload_id="upload-1", file_path="/tmp/x.csv", csv_content="a,b\n1,2\n")
+
+
+def test_replace_upload_data_rejects_whitespace_only_content() -> None:
+    with pytest.raises(ValidationError):
+        ReplaceUploadDataInput(upload_id="upload-1", csv_content="   ")
 
 
 def test_replace_upload_data_rejects_unknown_fields() -> None:
