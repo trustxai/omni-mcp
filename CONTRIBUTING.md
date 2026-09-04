@@ -31,7 +31,9 @@ scripts/tool_table.py generates docs/TOOLS.md and the README module catalogue
 
 `tools/__init__.py` **discovers** the modules in the package instead of listing them, so two people
 can implement different areas at the same time without touching a shared file — a new module
-registers itself by existing. Every module decorates against the single server instance it imports
+registers itself by existing. "Exists" means a top-level `.py`: sub-packages and sourceless `.pyc`
+files are skipped, because discovery *imports* what it finds and a stale bytecode file left behind
+by a layered install would otherwise be resurrected and executed at startup. Every module decorates against the single server instance it imports
 from `omni_mcp.server`. Do not add tools to an area that is not yours, and do not edit another
 area's module.
 

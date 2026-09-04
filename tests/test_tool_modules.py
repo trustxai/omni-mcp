@@ -13,12 +13,15 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import pkgutil
+import py_compile
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+import omni_mcp.tools
 from omni_mcp.server import mcp
 from omni_mcp.tools import available_tool_modules
 
@@ -275,3 +278,35 @@ async def test_the_generated_catalogue_ignores_an_active_filter(tmp_path: Path) 
     assert f"**{len(await mcp.list_tools())}** tools across **{len(modules)}** modules" in result.stdout
     for module in modules:
         assert f"| `{module}` |" in result.stdout, f"the catalogue dropped `{module}` under a filter"
+
+
+def test_discovery_skips_sourceless_bytecode_and_subpackages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stray `.pyc` must not become a module the server imports at startup.
+
+    Discovery replaced a hardcoded import list, which made anything sitting in
+    the package directory inert. `pkgutil` alone reports every importable name,
+    including a **sourceless** `.pyc` whose `.py` is gone — the shape a stale
+    layered install leaves behind — and importing it executes it. The last
+    assertion is the control: raw enumeration does see the file, so it is the
+    filter that excludes it, not the fixture.
+    """
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "real.py").write_text('MODULE_SUMMARY = "real"\n')
+    (package / "_private.py").write_text("")
+    (package / "subpkg").mkdir()
+    (package / "subpkg" / "__init__.py").write_text("")
+    source = tmp_path / "hidden_source.py"
+    source.write_text('raise RuntimeError("a stray module must never be imported")\n')
+    py_compile.compile(str(source), cfile=str(package / "zz_hidden.pyc"), doraise=True)
+    source.unlink()
+
+    monkeypatch.setattr(omni_mcp.tools, "__path__", [str(package)])
+
+    assert available_tool_modules() == ("real",)
+    assert sorted(name for _, name, _ in pkgutil.iter_modules([str(package)])) == [
+        "_private",
+        "real",
+        "subpkg",
+        "zz_hidden",
+    ]

@@ -15,9 +15,14 @@ what `register_all(modules=...)` does.
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import pkgutil
 import sys
 from collections.abc import Iterable, Sequence
+from importlib.abc import PathEntryFinder
+
+#: Suffixes a real, readable tool module can have — `.py` and nothing else.
+_SOURCE_SUFFIXES = tuple(importlib.machinery.SOURCE_SUFFIXES)
 
 
 class UnknownToolModuleError(ValueError):
@@ -40,14 +45,46 @@ class UnknownToolModuleError(ValueError):
         )
 
 
+def _is_source_module(finder: object, name: str) -> bool:
+    """True when `name` is backed by real source, not a stray `.pyc`.
+
+    `pkgutil.iter_modules` reports everything importable from the directory,
+    including a **sourceless** bytecode file with no `.py` beside it. While the
+    module list was hardcoded such a file was inert; discovery would import —
+    and therefore execute — it at server startup, and a stale `.pyc` that
+    survived a layered install after its `.py` was deleted upstream is the
+    realistic way one appears. Verified: a `zz_hidden.pyc` dropped into the
+    package was discovered, imported, and its side effects ran.
+
+    Checked through the finder's spec rather than by looking for a sibling file
+    so it stays correct for an import path that is not a plain directory.
+    """
+    if not isinstance(finder, PathEntryFinder):
+        return False
+    spec = finder.find_spec(name)
+    origin = getattr(spec, "origin", None)
+    return bool(origin and origin.endswith(_SOURCE_SUFFIXES))
+
+
 def available_tool_modules() -> tuple[str, ...]:
     """Every tool module present in the package, registered or not.
 
     Discovered rather than hand-listed so it never drifts as modules land, and
     deliberately independent of any active filter: this is the menu, not the
     order.
+
+    Only top-level source modules count. Sub-packages and sourceless `.pyc`
+    files are skipped — see `_is_source_module`. A stray `.py` is still picked
+    up, and deliberately so: it is indistinguishable from a legitimate new
+    module, which is exactly how modules are meant to land here.
     """
-    return tuple(sorted(name for _, name, _ in pkgutil.iter_modules(__path__) if not name.startswith("_")))
+    return tuple(
+        sorted(
+            name
+            for finder, name, ispkg in pkgutil.iter_modules(__path__)
+            if not ispkg and not name.startswith("_") and _is_source_module(finder, name)
+        )
+    )
 
 
 def registered_tool_modules() -> tuple[str, ...]:
