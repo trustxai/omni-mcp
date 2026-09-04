@@ -47,6 +47,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Models, model YAML, validation, schemas, cache, topics"
+
 #: File suffixes the YAML write/delete endpoints accept for regular files.
 YAML_FILE_SUFFIXES: tuple[str, ...] = (".topic", ".composite_topic", ".view")
 

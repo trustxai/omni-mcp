@@ -16,6 +16,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, cursor_paginated_response, iso_or_na, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "CSV uploads (data input tables)"
+
 
 class UploadType(StrEnum):
     """`type` filter for `omni_list_uploads`."""

@@ -22,17 +22,40 @@ src/omni_mcp/
   errors.py          handle_api_error(exc) -> str
   formatters.py      ResponseFormat, to_json, truncate_result, pagination, Arrow decoding
   server.py          the FastMCP instance; imports register_all at import time
-  tools/__init__.py  register_all(): imports every tool module (no arguments)
+  tools/__init__.py  register_all(modules): discovers and imports the tool modules
   tools/<area>.py    one module per API area — where your tools go
 tests/test_<area>.py one test file per tool module
 docs/               README long-form companions (TOOLS.md, comparison.md)
-scripts/tool_table.py generates docs/TOOLS.md and the README summary
+scripts/tool_table.py generates docs/TOOLS.md and the README module catalogue
 ```
 
-`tools/__init__.py` already lists **every** module, so two people can implement different areas at
-the same time without touching a shared file. `register_all()` takes no argument: every module
-decorates against the single server instance it imports from `omni_mcp.server`. Do not add tools to an area that is not yours, and do
-not edit another area's module.
+`tools/__init__.py` **discovers** the modules in the package instead of listing them, so two people
+can implement different areas at the same time without touching a shared file — a new module
+registers itself by existing. "Exists" means a top-level `.py`: sub-packages and sourceless `.pyc`
+files are skipped, because discovery *imports* what it finds and a stale bytecode file left behind
+by a layered install would otherwise be resurrected and executed at startup. Every module decorates against the single server instance it imports
+from `omni_mcp.server`. Do not add tools to an area that is not yours, and do not edit another
+area's module.
+
+`register_all(modules)` applies the `OMNI_TOOL_MODULES` allowlist, and it has to: registration is an
+import, and an import cannot be undone. Two consequences for anything you write here:
+
+- **Never report the package inventory as "what is loaded".** `available_tool_modules()` is the
+  menu; `registered_tool_modules()` is what this process actually has. `omni_get_api_info` prints
+  the second one — reporting the first was a bug, and it made the one tool that answers "which
+  tools exist here?" lie whenever a filter was set.
+- **A test that asserts on the full registry needs a fresh interpreter**, because the suite's own
+  process registers everything at collection time. See `tests/test_tool_modules.py`.
+
+Every module also declares one line about itself, below its imports:
+
+```python
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Folders, folder permissions, folder labels, labels"
+```
+
+That string is the `Covers` column of the README catalogue. A module without it fails
+`scripts/tool_table.py` rather than rendering a blank cell.
 
 ## The tool contract
 
@@ -308,16 +331,23 @@ successful upload).
 
 ## The tool reference
 
-`docs/TOOLS.md` is generated — regenerate it whenever you add, rename or re-describe a tool:
+Both `docs/TOOLS.md` and the README's module catalogue are generated — regenerate them whenever you
+add, rename or re-describe a tool:
 
 ```bash
-uv run python scripts/tool_table.py
+uv run python scripts/tool_table.py           # paste verbatim under the header in docs/TOOLS.md
+uv run python scripts/tool_table.py --write   # rewrites the README block in place
 ```
 
-Paste the output verbatim under the header in `docs/TOOLS.md`, keeping the generator's format
-byte-for-byte. Then update the compact per-module summary in the README between the
-`<!-- TOOL_TABLE_START -->` and `<!-- TOOL_TABLE_END -->` markers — the totals and your module's
-row need to match the numbers the generator just printed.
+Keep the generator's format in `docs/TOOLS.md` byte-for-byte. The README block between
+`<!-- TOOL_MODULES_START -->` and `<!-- TOOL_MODULES_END -->` is **not** hand-edited: `--write`
+produces it, and `tests/test_tool_table.py` fails when the committed block drifts from what the
+generator emits — which is the check that actually runs in CI.
 
-The script exits non-zero (printing nothing) when a tool's registered `name=` does not match the
-function implementing it, since that tool could not be attributed to a module.
+Both outputs describe the **whole package**, never this machine's `OMNI_TOOL_MODULES`: the generator
+calls `register_all()` with no filter first. A catalogue that shrank with the local filter would
+hide from a reader exactly the modules they are trying to decide about.
+
+The script exits non-zero (printing nothing on stdout) when a tool's registered `name=` does not
+match the function implementing it, since that tool could not be attributed to a module, or when a
+module declares no `MODULE_SUMMARY`.

@@ -35,6 +35,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Content search, the content validator, dashboard export/import"
+
 #: Model-element kinds the content validator and find/replace understand.
 ElementType = Literal["VIEW", "FIELD", "TOPIC"]
 

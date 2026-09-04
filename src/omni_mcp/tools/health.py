@@ -8,32 +8,54 @@ Lane workers: copy this module's shape (input model, decorator + annotations,
 from __future__ import annotations
 
 import os
-import pkgutil
 from typing import Any
 
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-import omni_mcp.tools
 from omni_mcp.client import get_client
 from omni_mcp.config import get_settings
 from omni_mcp.errors import handle_api_error, validation_error_detail
 from omni_mcp.formatters import ResponseFormat, to_json, truncate_result
 from omni_mcp.server import mcp
+from omni_mcp.tools import available_tool_modules, registered_tool_modules
+
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Local diagnostics — configuration and connectivity"
 
 
-def _discover_tool_modules() -> tuple[str, ...]:
-    """Every module in `omni_mcp.tools` — the same set `register_all` imports.
+def _tool_module_lines() -> list[str]:
+    """The "Tool modules" section of the configuration report.
 
-    Discovered rather than hand-listed so this never drifts as modules land.
+    Reports the modules this process actually imported — **not** every module
+    the package ships. With `OMNI_TOOL_MODULES` set the two differ, and this is the
+    one tool whose job is answering "what is loaded here?", so printing the
+    package inventory would make it lie exactly when someone is debugging a
+    filter. The modules left out are still named, so a reader can see what they
+    could turn back on.
+
+    Read at call time rather than captured at import: registration finishes
+    after this module is imported.
     """
-    return tuple(
-        sorted(name for _, name, _ in pkgutil.iter_modules(omni_mcp.tools.__path__) if not name.startswith("_"))
+    registered = sorted(registered_tool_modules())
+    available = available_tool_modules()
+    filtered = [name for name in available if name not in registered]
+    heading = (
+        f"## Tool modules ({len(registered)} of {len(available)} registered)"
+        if filtered
+        else f"## Tool modules ({len(registered)})"
     )
-
-
-#: Every tool module in this server, reported by `omni_get_api_info`.
-TOOL_MODULES: tuple[str, ...] = _discover_tool_modules()
+    lines = [heading, "", ", ".join(f"`{module}`" for module in registered) or "_None registered._"]
+    if filtered:
+        lines.extend(
+            [
+                "",
+                "_Filtered by `OMNI_TOOL_MODULES`. Not registered: "
+                + ", ".join(f"`{module}`" for module in filtered)
+                + "._",
+            ]
+        )
+    return lines
 
 
 class HealthCheckInput(BaseModel):
@@ -138,10 +160,8 @@ def _invalid_configuration_report(exc: ValidationError) -> str:
         "",
         "Fix the variable in the environment or `.env`, then restart the server.",
         "",
-        f"## Tool modules ({len(TOOL_MODULES)})",
-        "",
-        ", ".join(f"`{module}`" for module in TOOL_MODULES),
     ]
+    lines.extend(_tool_module_lines())
     return "\n".join(lines)
 
 
@@ -256,7 +276,9 @@ async def omni_get_api_info(params: ApiInfoInput) -> str:
 
     Returns:
     A markdown summary of the instance URL, credential presence (never the key
-    itself), timeout/retry settings, the rate limit, and the tool modules.
+    itself), timeout/retry settings, the rate limit, and the tool modules that
+    are actually registered — naming the ones `OMNI_TOOL_MODULES` left out, so
+    a narrowed server still shows what else it could expose.
 
     Examples:
     - `{"params": {}}`
@@ -283,10 +305,8 @@ async def omni_get_api_info(params: ApiInfoInput) -> str:
             "Rate limit: **60 requests/minute per API key**. On `429` the client honours `Retry-After` "
             "and retries automatically; prefer fewer, larger pages over many small calls.",
             "",
-            f"## Tool modules ({len(TOOL_MODULES)})",
-            "",
-            ", ".join(f"`{module}`" for module in TOOL_MODULES),
         ]
+        lines.extend(_tool_module_lines())
         return truncate_result("\n".join(lines))
     except ValidationError as exc:
         # A malformed OMNI_* variable makes `Settings()` itself raise. This is

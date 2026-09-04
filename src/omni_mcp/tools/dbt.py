@@ -23,6 +23,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, cursor_paginated_response, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "dbt configuration, environments, exposures"
+
 _DbtAuthMethod = Literal["ssh", "https_token", "github_app"]
 _DbtVersion = Literal["Auto", "1.10", "1.11"]
 

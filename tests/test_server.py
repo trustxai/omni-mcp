@@ -10,7 +10,7 @@ import mcp.types as mcp_types
 
 import omni_mcp.server
 from omni_mcp.server import mcp
-from omni_mcp.tools.health import TOOL_MODULES
+from omni_mcp.tools import available_tool_modules, registered_tool_modules
 
 
 async def _tools() -> list[mcp_types.Tool]:
@@ -74,15 +74,19 @@ def test_registration_runs_after_the_module_is_fully_defined() -> None:
     """
     source = inspect.getsource(omni_mcp.server)
 
-    assert source.index("def main_stdio") < source.index("register_all()")
+    assert source.index("def main_stdio") < source.index("register_all(")
 
 
 def test_tool_modules_match_what_register_all_imports() -> None:
-    """`TOOL_MODULES` is discovered; `register_all` must import all of it."""
-    for module in TOOL_MODULES:
+    """Modules are discovered; unfiltered, `register_all` must import all of them."""
+    available = available_tool_modules()
+    for module in available:
         assert f"omni_mcp.tools.{module}" in sys.modules, f"register_all() does not import tools/{module}.py"
-    assert "health" in TOOL_MODULES
-    assert not any(module.startswith("_") for module in TOOL_MODULES)
+    assert "health" in available
+    assert not any(module.startswith("_") for module in available)
+    # No `OMNI_TOOL_MODULES` in this process (conftest drops it), so what was
+    # registered is the whole package.
+    assert sorted(registered_tool_modules()) == sorted(available)
 
 
 def test_importing_the_server_writes_nothing_to_stdout() -> None:

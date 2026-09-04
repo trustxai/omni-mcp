@@ -17,6 +17,14 @@ from omni_mcp.config import Settings, get_settings
 # are isolated from it by the autouse fixture below.
 load_dotenv()
 
+# `OMNI_TOOL_MODULES` is the one variable the autouse fixture cannot undo: tool
+# registration runs at `import omni_mcp.server`, which happens while pytest is
+# still collecting, long before any fixture. A developer running with a narrowed
+# server would otherwise collect a suite whose registry is missing modules — so
+# it is dropped here, before the first test module imports the server. Tests
+# that exercise the filter start their own interpreter (tests/test_tool_modules.py).
+os.environ.pop("OMNI_TOOL_MODULES", None)
+
 #: Placeholder credentials handed to the default client during non-live tests.
 BLOCKED_BASE_URL = "https://blocked.invalid"
 BLOCKED_API_KEY = "blocked-test-key"

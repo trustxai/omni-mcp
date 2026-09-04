@@ -23,6 +23,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, iso_or_na, markdown_table, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Dashboard downloads (PDF/CSV/…) and dashboard filters"
+
 #: Download responses are binary (PDF/PNG/CSV/XLSX/ZIP) or single-tile JSON; without this the
 #: client's default `accept: application/json` header can make the API 406 a binary format.
 _BINARY_ACCEPT_HEADERS: dict[str, str] = {"accept": "*/*"}

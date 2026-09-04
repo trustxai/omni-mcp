@@ -27,6 +27,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Scheduled deliveries, alerts, recipients, email-only users"
+
 #: Output formats a schedule can deliver.
 ScheduleFormat = Literal["csv", "link_only", "json", "pdf", "png", "xlsx"]
 #: Delivery destinations the API supports.

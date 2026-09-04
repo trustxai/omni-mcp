@@ -35,6 +35,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Running queries and reading their results"
+
 #: Generated SQL can be enormous; it is echoed fenced and cut at this length.
 MAX_SQL_CHARS = 2_000
 

@@ -20,6 +20,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, cursor_paginated_response, iso_or_na, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Standard, embed and email-only users (SCIM)"
+
 #: Omni's SCIM extension property carrying custom user attributes as key/value pairs.
 USER_ATTRIBUTE_URN = "urn:omni:params:1.0:UserAttribute"
 #: Omni's SCIM extension schema carrying additional metadata (currently just `lastLogin`).
