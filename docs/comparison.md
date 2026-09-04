@@ -34,9 +34,10 @@ Grouped by the setting that enables them:
 
 Access is deliberately narrow: interactions are scoped to the model (and topic, if supplied) given
 to the server, which is what keeps natural-language querying from reaching data the caller should
-not see. `pickModel`, `pickTopic` and query execution all run through Omni's own AI pipeline, so
-disabling **Omni Agent** disables every tool except `pickModel` (calls return
-`403 Feature is not enabled`).
+not see. The querying and docs-search tools all run through the same AI pipeline as the in-app
+Omni Agent, so disabling **Omni Agent** disables them — they still appear in the client but calls
+return `403 Feature is not enabled`. `pickModel` is the exception: it only lists the models the
+caller can reach, so it keeps working.
 
 ## What this server exposes
 
@@ -95,8 +96,11 @@ Both enforce the permissions of the credential in play, and neither adds permiss
   run with your in-app permissions — a Viewer can complete the flow but still cannot query. With an
   API key, calls use the key creator's permissions.
 - This server: every call carries `OMNI_API_KEY`. A **Personal Access Token** acts as one user;
-  endpoints that require an **Organization API key** (SCIM user/group management, `userId`
-  impersonation) answer `403`. Row-level security, model roles and content permissions apply
+  endpoints that require an **Organization API key** — SCIM user/group management, `userId`
+  impersonation, document export/import (`omni_export_dashboard`, `omni_import_dashboard`) and
+  email-only user management (`omni_manage_email_only_user`,
+  `omni_bulk_manage_email_only_users`) — answer `403`. Row-level security, model roles and content
+  permissions apply
   exactly as they do in the app. `omni_whoami` reports the key's scope, org role and per-model
   permissions before you rely on any of it.
 

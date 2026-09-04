@@ -26,9 +26,6 @@ wire dbt; publish document drafts; run and pause schedules; audit AI credit limi
 The two are complementary and can be installed side by side — see
 [docs/comparison.md](docs/comparison.md) for an honest side-by-side.
 
-> This is an independent open-source project. It is not affiliated with, endorsed by, or supported
-> by Omni.
-
 ## Quick start
 
 Once published on PyPI:
@@ -46,6 +43,9 @@ uvx --from git+https://github.com/trustxai/omni-mcp omni-mcp
 The server speaks **stdio only** and needs two environment variables: your instance URL and an API
 key.
 
+> This is an independent open-source project. It is not affiliated with, endorsed by, or supported
+> by Omni.
+
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `OMNI_BASE_URL` | yes | — | Your instance URL, e.g. `https://your-instance.omniapp.co`. A trailing `/api` is accepted and normalised. |
@@ -56,19 +56,29 @@ key.
 
 ### Getting an API key
 
-Create an **Organization API key** in Omni under **Settings → API keys**, or use a **Personal
-Access Token** (see the [API authentication docs](https://docs.omni.co/api/authentication)). The
-difference matters:
+Two kinds of credential work, and which one you pick decides what the tools can reach (see the
+[API authentication docs](https://docs.omni.co/api/authentication)):
 
-- A **PAT** acts as a single user and carries that user's permissions. It works for the large
-  majority of tools.
-- An **Organization API key** is required for the SCIM-backed user and group endpoints
-  (`omni_list_users`, `omni_create_user`, `omni_create_user_group`, `omni_update_user_group`, …)
-  and for any tool that takes a `user_id` to impersonate another user (several AI tools do). With a
-  PAT those answer `403`.
+- An **Organization API key** — **Settings → API access → Organization keys**. Organization Admin
+  only, and it is what unlocks the whole surface.
+- A **Personal Access Token** — generate it under **Profile → Manage account → Generate token**;
+  once created it is listed under **Settings → API access → Personal tokens**. A PAT acts as a
+  single user and carries that user's permissions.
 
-The API is rate limited to **60 requests per minute per key**. Start a session with
-`omni_health_check` to confirm the key works and `omni_whoami` to see exactly what it can reach.
+A PAT covers the large majority of tools, but the API bars it from a documented set of endpoints,
+which answer `403`:
+
+- SCIM-backed user and group management — `omni_list_users`, `omni_create_user`,
+  `omni_create_user_group`, `omni_update_user_group` and their siblings.
+- Any tool that takes a `user_id` to act on another user's behalf (several AI tools do).
+- Document export and import — `omni_export_dashboard`, `omni_import_dashboard`.
+- Email-only user management — `omni_manage_email_only_user`,
+  `omni_bulk_manage_email_only_users`.
+
+Use an Organization API key for those. The API is rate limited to **60 requests per minute per
+key**, and instances can ask Omni to raise it (up to 500 requests/minute is documented); the client
+honours `Retry-After` either way. Start a session with `omni_health_check` to confirm the key works
+and `omni_whoami` to see exactly what it can reach.
 
 ## Client configuration
 
@@ -186,11 +196,14 @@ Short, real sequences an agent can run end to end. Tool names are exactly as reg
 
 ### Modelling on a branch, then promoting it
 
-1. `omni_list_models` with `include_branches` to find the shared model and its active branches.
+1. `omni_list_models` with `include: "activeBranches"` to see each shared model together with its
+   active branches — or `model_kind: "BRANCH"` plus `base_model_id: <shared model id>` to list one
+   model's branches directly.
 2. `omni_get_model_yaml` on the branch — it returns each file with a **checksum** (this server
    defaults `include_checksums` to true precisely so the write-back is safe).
-3. Edit the YAML, then `omni_update_model_yaml` with `previous_checksum` per file. A checksum
-   mismatch means someone else wrote first; re-fetch rather than overwrite.
+3. Edit the YAML, then `omni_update_model_yaml` with `files` (file name → new content) and
+   `checksums` (the same file name → the checksum `omni_get_model_yaml` returned for it). A
+   checksum mismatch means someone else wrote first; re-fetch rather than overwrite.
 4. `omni_validate_model` on the branch and fix what it groups by file.
 5. `omni_create_or_update_model_branch_pull_request` to push the branch and open (or update) the
    PR, then `omni_merge_model_branch` once it is approved.
@@ -244,9 +257,9 @@ Short, real sequences an agent can run end to end. Tool names are exactly as reg
   prompt on destructive tools will prompt on these.
 - **Secrets are never echoed.** Connection passwords, deploy private keys, SFTP passwords, webhook
   secrets and CSV payloads never appear in a tool result. Tools report *whether* a credential is
-  configured, never its value, and git clone URLs are stripped of embedded userinfo.
-- **Rate limits are handled.** 60 requests/minute per key; the client honours `Retry-After` on
-  `429` and backs off on `502/503/504` automatically.
+  configured, never its value.
+- **Rate limits are handled.** 60 requests/minute per key (raisable on request, up to a documented
+  500); the client honours `Retry-After` on `429` and backs off on `502/503/504` automatically.
 - **Results stay under the 1 MB MCP limit.** Everything goes through a byte-budgeted truncator that
   leaves a visible marker rather than silently cutting; tune it with `OMNI_MAX_RESULT_CHARS`.
 - **Binary downloads go to disk.** Dashboard PDFs, CSVs and other binaries are written to the

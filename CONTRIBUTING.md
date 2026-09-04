@@ -36,7 +36,7 @@ not edit another area's module.
 
 ## The tool contract
 
-1. **Naming.** Tool names are `omni_<verb>_<noun>`: `omni_list_users`, `omni_get_model`,
+1. **Naming.** Tool names are `omni_<verb>_<noun>`: `omni_list_users`, `omni_get_model_yaml`,
    `omni_create_folder`, `omni_delete_schedule`. Lower snake case, always the `omni_` prefix (it is
    enforced by `tests/test_server.py`), and the same verb vocabulary throughout.
 
