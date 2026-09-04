@@ -159,9 +159,9 @@ async def omni_get_ai_credit_controls(params: GetAiCreditControlsInput) -> str:
 
     When NOT to Use:
     - To read one specific user's or entity group's limit — use
-      `omni_list_user_ai_credit_limits` / `omni_list_user_group_ai_credit_limits`.
+      `omni_list_user_ai_credit_limits` / `omni_list_entity_group_ai_credit_limits`.
     - To read credit *usage* for specific users or entity groups — use
-      `omni_get_user_ai_credit_usage` / `omni_get_user_group_ai_credit_usage`.
+      `omni_get_user_ai_credit_usage` / `omni_get_entity_group_ai_credit_usage`.
 
     Returns:
     A markdown table of the thresholds, defaults, usage, and billing-period
@@ -257,7 +257,7 @@ async def omni_update_ai_credit_controls(params: UpdateAiCreditControlsInput) ->
 
     When NOT to Use:
     - To set an individual user's or entity group's limit — use
-      `omni_set_user_ai_credit_limits` / `omni_set_user_group_ai_credit_limits`.
+      `omni_set_user_ai_credit_limits` / `omni_set_entity_group_ai_credit_limits`.
 
     Returns:
     A short confirmation with a markdown table of the resulting full state
@@ -461,7 +461,7 @@ async def omni_set_user_ai_credit_limits(params: SetUserAiCreditLimitsInput) -> 
 
     When NOT to Use:
     - To change the organization-wide default — use `omni_update_ai_credit_controls`.
-    - To update entity groups instead of users — use `omni_set_user_group_ai_credit_limits`.
+    - To update entity groups instead of users — use `omni_set_entity_group_ai_credit_limits`.
 
     Returns:
     A short confirmation listing each user's resulting effective limit
@@ -505,8 +505,8 @@ async def omni_set_user_ai_credit_limits(params: SetUserAiCreditLimitsInput) -> 
 # --------------------------------------------------------------------------
 
 
-class ListUserGroupAiCreditLimitsInput(BaseModel):
-    """Input for `omni_list_user_group_ai_credit_limits`."""
+class ListEntityGroupAiCreditLimitsInput(BaseModel):
+    """Input for `omni_list_entity_group_ai_credit_limits`."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -520,7 +520,7 @@ class ListUserGroupAiCreditLimitsInput(BaseModel):
 
 
 @mcp.tool(
-    name="omni_list_user_group_ai_credit_limits",
+    name="omni_list_entity_group_ai_credit_limits",
     annotations=ToolAnnotations(
         title="List Entity Group AI Credit Limits",
         readOnlyHint=True,
@@ -529,7 +529,7 @@ class ListUserGroupAiCreditLimitsInput(BaseModel):
         openWorldHint=True,
     ),
 )
-async def omni_list_user_group_ai_credit_limits(params: ListUserGroupAiCreditLimitsInput) -> str:
+async def omni_list_entity_group_ai_credit_limits(params: ListEntityGroupAiCreditLimitsInput) -> str:
     """List the organization's individual (per-embed-entity-group) AI credit limits.
 
     Calls `GET /v1/ai/credit-controls/entity-groups`. Only entity groups with
@@ -538,7 +538,7 @@ async def omni_list_user_group_ai_credit_limits(params: ListUserGroupAiCreditLim
 
     When to Use:
     - To audit which embed entity groups have a custom AI credit limit.
-    - Before calling `omni_set_user_group_ai_credit_limits`, to see current overrides.
+    - Before calling `omni_set_entity_group_ai_credit_limits`, to see current overrides.
 
     When NOT to Use:
     - To read the organization-wide default limit — use `omni_get_ai_credit_controls`.
@@ -625,8 +625,8 @@ class EntityGroupCreditLimitEntry(BaseModel):
         return payload
 
 
-class SetUserGroupAiCreditLimitsInput(BaseModel):
-    """Input for `omni_set_user_group_ai_credit_limits`."""
+class SetEntityGroupAiCreditLimitsInput(BaseModel):
+    """Input for `omni_set_entity_group_ai_credit_limits`."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -642,7 +642,7 @@ class SetUserGroupAiCreditLimitsInput(BaseModel):
 
 
 @mcp.tool(
-    name="omni_set_user_group_ai_credit_limits",
+    name="omni_set_entity_group_ai_credit_limits",
     annotations=ToolAnnotations(
         title="Set Entity Group AI Credit Limits",
         readOnlyHint=False,
@@ -651,7 +651,7 @@ class SetUserGroupAiCreditLimitsInput(BaseModel):
         openWorldHint=True,
     ),
 )
-async def omni_set_user_group_ai_credit_limits(params: SetUserGroupAiCreditLimitsInput) -> str:
+async def omni_set_entity_group_ai_credit_limits(params: SetEntityGroupAiCreditLimitsInput) -> str:
     """Set individual embed entity groups' AI credit limits in bulk.
 
     Calls `PATCH /v1/ai/credit-controls/entity-groups`. Each entry names an
@@ -730,6 +730,15 @@ class GetUserAiCreditUsageInput(BaseModel):
         default=ResponseFormat.MARKDOWN, description="`markdown` for a usage table, `json` for the raw payload."
     )
 
+    @model_validator(mode="after")
+    def _check_no_duplicate_user_ids(self) -> GetUserAiCreditUsageInput:
+        seen: set[str] = set()
+        for user_id in self.user_ids:
+            if user_id in seen:
+                raise ValueError(f"user_ids contains a duplicate: {user_id!r}")
+            seen.add(user_id)
+        return self
+
 
 @mcp.tool(
     name="omni_get_user_ai_credit_usage",
@@ -755,7 +764,7 @@ async def omni_get_user_ai_credit_usage(params: GetUserAiCreditUsageInput) -> st
 
     When NOT to Use:
     - To read a user's configured *limit* rather than usage — use `omni_list_user_ai_credit_limits`.
-    - To read usage for embed entity groups — use `omni_get_user_group_ai_credit_usage`.
+    - To read usage for embed entity groups — use `omni_get_entity_group_ai_credit_usage`.
 
     Returns:
     A markdown table of `userId` → `creditsUsed` plus the billing-period
@@ -792,8 +801,8 @@ async def omni_get_user_ai_credit_usage(params: GetUserAiCreditUsageInput) -> st
         return handle_api_error(exc)
 
 
-class GetUserGroupAiCreditUsageInput(BaseModel):
-    """Input for `omni_get_user_group_ai_credit_usage`."""
+class GetEntityGroupAiCreditUsageInput(BaseModel):
+    """Input for `omni_get_entity_group_ai_credit_usage`."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -811,9 +820,18 @@ class GetUserGroupAiCreditUsageInput(BaseModel):
         default=ResponseFormat.MARKDOWN, description="`markdown` for a usage table, `json` for the raw payload."
     )
 
+    @model_validator(mode="after")
+    def _check_no_duplicate_entities(self) -> GetEntityGroupAiCreditUsageInput:
+        seen: set[str] = set()
+        for entity in self.entities:
+            if entity in seen:
+                raise ValueError(f"entities contains a duplicate: {entity!r}")
+            seen.add(entity)
+        return self
+
 
 @mcp.tool(
-    name="omni_get_user_group_ai_credit_usage",
+    name="omni_get_entity_group_ai_credit_usage",
     annotations=ToolAnnotations(
         title="Get Entity Group AI Credit Usage",
         readOnlyHint=True,
@@ -822,7 +840,7 @@ class GetUserGroupAiCreditUsageInput(BaseModel):
         openWorldHint=True,
     ),
 )
-async def omni_get_user_group_ai_credit_usage(params: GetUserGroupAiCreditUsageInput) -> str:
+async def omni_get_entity_group_ai_credit_usage(params: GetEntityGroupAiCreditUsageInput) -> str:
     """Read specific embed entity groups' AI credit usage for the current billing period.
 
     Calls `POST /v1/ai/credit-usage/entity-groups` (a bulk lookup by ID, so
@@ -838,7 +856,7 @@ async def omni_get_user_group_ai_credit_usage(params: GetUserGroupAiCreditUsageI
 
     When NOT to Use:
     - To read an entity group's configured *limit* rather than usage — use
-      `omni_list_user_group_ai_credit_limits`.
+      `omni_list_entity_group_ai_credit_limits`.
     - To read usage for individual users — use `omni_get_user_ai_credit_usage`.
 
     Returns:
@@ -1205,9 +1223,8 @@ async def omni_generate_model_suggestions(params: GenerateModelSuggestionsInput)
     `model_id`. 403 means the caller is not an Organization Admin. 404
     means the model was not found in this organization. 409 means a
     generation run is already active for this model. 429 means a run
-    completed recently (`SuggestionsCooldownResponse`); retry after the
-    cooldown named in the `Retry-After` header. 500 means the job failed
-    to enqueue.
+    completed recently; retry after the cooldown named in the
+    `Retry-After` header. 500 means the job failed to enqueue.
     """
     try:
         path = f"/v1/models/{quote(params.model_id, safe='')}/suggestions/generate"

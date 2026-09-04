@@ -17,16 +17,16 @@ from omni_mcp.tools.ai_governance import (
     EntityGroupCreditLimitEntry,
     GenerateModelSuggestionsInput,
     GetAiCreditControlsInput,
+    GetEntityGroupAiCreditUsageInput,
     GetLatestSuggestionRunInput,
     GetSuggestionRunStatusInput,
     GetUserAiCreditUsageInput,
-    GetUserGroupAiCreditUsageInput,
+    ListEntityGroupAiCreditLimitsInput,
     ListModelSuggestionsInput,
     ListUserAiCreditLimitsInput,
-    ListUserGroupAiCreditLimitsInput,
     RestoreModelSuggestionInput,
+    SetEntityGroupAiCreditLimitsInput,
     SetUserAiCreditLimitsInput,
-    SetUserGroupAiCreditLimitsInput,
     UpdateAiCreditControlsInput,
     UserCreditLimitEntry,
     omni_delete_model_suggestion,
@@ -35,16 +35,16 @@ from omni_mcp.tools.ai_governance import (
     omni_enable_model_suggestions_schedule,
     omni_generate_model_suggestions,
     omni_get_ai_credit_controls,
+    omni_get_entity_group_ai_credit_usage,
     omni_get_latest_suggestion_run,
     omni_get_suggestion_run_status,
     omni_get_user_ai_credit_usage,
-    omni_get_user_group_ai_credit_usage,
+    omni_list_entity_group_ai_credit_limits,
     omni_list_model_suggestions,
     omni_list_user_ai_credit_limits,
-    omni_list_user_group_ai_credit_limits,
     omni_restore_model_suggestion,
+    omni_set_entity_group_ai_credit_limits,
     omni_set_user_ai_credit_limits,
-    omni_set_user_group_ai_credit_limits,
     omni_update_ai_credit_controls,
 )
 
@@ -218,6 +218,30 @@ async def test_update_ai_credit_controls_negative_rejected() -> None:
         UpdateAiCreditControlsInput(downgrade_credits=-1)
 
 
+async def test_update_ai_credit_controls_model_validate_null_vs_omit(
+    monkeypatch: pytest.MonkeyPatch, configured: None
+) -> None:
+    """Mirrors how the MCP layer builds this model from raw JSON arguments
+    (`arg_model.model_validate(...)`, keeping sub-models un-dumped): an
+    explicit `null` must survive as a value to send, while a field left out
+    entirely must not appear in the payload at all."""
+    fake = _FakeClient(payload=CREDIT_CONTROLS)
+    _patch(monkeypatch, fake)
+
+    explicit_null = UpdateAiCreditControlsInput.model_validate({"downgrade_credits": None})
+    result = await omni_update_ai_credit_controls(explicit_null)
+
+    assert fake.calls == [("PATCH", "/v1/ai/credit-controls", {"json_body": {"downgradeCredits": None}})]
+    assert "AI Credit Controls Updated" in result
+
+    fake.calls.clear()
+    omitted = UpdateAiCreditControlsInput.model_validate({})
+    result = await omni_update_ai_credit_controls(omitted)
+
+    assert result.startswith("Error: provide at least one field")
+    assert fake.calls == []
+
+
 async def test_update_ai_credit_controls_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(exc=_http_error(400, "downgradeCredits greater than shutoffCredits"))
     _patch(monkeypatch, fake)
@@ -381,7 +405,7 @@ async def test_set_user_ai_credit_limits_error_path(monkeypatch: pytest.MonkeyPa
 
 
 # --------------------------------------------------------------------------
-# omni_list_user_group_ai_credit_limits
+# omni_list_entity_group_ai_credit_limits
 # --------------------------------------------------------------------------
 
 
@@ -394,11 +418,11 @@ ENTITY_GROUP_LIMITS_PAGE: dict[str, Any] = {
 }
 
 
-async def test_list_user_group_ai_credit_limits_markdown(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_list_entity_group_ai_credit_limits_markdown(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(payload=ENTITY_GROUP_LIMITS_PAGE)
     _patch(monkeypatch, fake)
 
-    result = await omni_list_user_group_ai_credit_limits(ListUserGroupAiCreditLimitsInput())
+    result = await omni_list_entity_group_ai_credit_limits(ListEntityGroupAiCreditLimitsInput())
 
     assert ENTITY in result
     assert "unlimited" in result
@@ -406,38 +430,40 @@ async def test_list_user_group_ai_credit_limits_markdown(monkeypatch: pytest.Mon
     assert fake.calls == [("GET", "/v1/ai/credit-controls/entity-groups", {"params": {"pageSize": 20}})]
 
 
-async def test_list_user_group_ai_credit_limits_json(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_list_entity_group_ai_credit_limits_json(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(payload=ENTITY_GROUP_LIMITS_PAGE)
     _patch(monkeypatch, fake)
 
-    result = await omni_list_user_group_ai_credit_limits(
-        ListUserGroupAiCreditLimitsInput(response_format=ResponseFormat.JSON)
+    result = await omni_list_entity_group_ai_credit_limits(
+        ListEntityGroupAiCreditLimitsInput(response_format=ResponseFormat.JSON)
     )
     payload = json.loads(result)
 
     assert payload["items"][0]["entity"] == ENTITY
 
 
-async def test_list_user_group_ai_credit_limits_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_list_entity_group_ai_credit_limits_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(exc=_http_error(403, "per-entity-group AI credit limits are not enabled"))
     _patch(monkeypatch, fake)
 
-    result = await omni_list_user_group_ai_credit_limits(ListUserGroupAiCreditLimitsInput())
+    result = await omni_list_entity_group_ai_credit_limits(ListEntityGroupAiCreditLimitsInput())
 
     assert result.startswith("Error (403):")
 
 
 # --------------------------------------------------------------------------
-# omni_set_user_group_ai_credit_limits
+# omni_set_entity_group_ai_credit_limits
 # --------------------------------------------------------------------------
 
 
-async def test_set_user_group_ai_credit_limits_sends_payload(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_set_entity_group_ai_credit_limits_sends_payload(
+    monkeypatch: pytest.MonkeyPatch, configured: None
+) -> None:
     fake = _FakeClient(payload={"entityGroups": [{"entity": ENTITY, "creditLimit": 50, "usesDefaultLimit": False}]})
     _patch(monkeypatch, fake)
 
-    result = await omni_set_user_group_ai_credit_limits(
-        SetUserGroupAiCreditLimitsInput(entity_groups=[EntityGroupCreditLimitEntry(entity=ENTITY, credit_limit=50)])
+    result = await omni_set_entity_group_ai_credit_limits(
+        SetEntityGroupAiCreditLimitsInput(entity_groups=[EntityGroupCreditLimitEntry(entity=ENTITY, credit_limit=50)])
     )
 
     assert fake.calls == [
@@ -457,12 +483,12 @@ def test_entity_group_credit_limit_entry_requires_exactly_one() -> None:
         EntityGroupCreditLimitEntry(entity=ENTITY, credit_limit=10, use_default_limit=True)
 
 
-async def test_set_user_group_ai_credit_limits_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_set_entity_group_ai_credit_limits_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(exc=_http_error(404, "entity has no entity group"))
     _patch(monkeypatch, fake)
 
-    result = await omni_set_user_group_ai_credit_limits(
-        SetUserGroupAiCreditLimitsInput(
+    result = await omni_set_entity_group_ai_credit_limits(
+        SetEntityGroupAiCreditLimitsInput(
             entity_groups=[EntityGroupCreditLimitEntry(entity="unknown-entity", credit_limit=10)]
         )
     )
@@ -512,6 +538,11 @@ def test_get_user_ai_credit_usage_bounds() -> None:
         GetUserAiCreditUsageInput(user_ids=[f"user-{i}" for i in range(1001)])
 
 
+def test_get_user_ai_credit_usage_rejects_duplicate_ids() -> None:
+    with pytest.raises(ValueError):
+        GetUserAiCreditUsageInput(user_ids=[USER_ID, USER_ID])
+
+
 async def test_get_user_ai_credit_usage_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(exc=_http_error(404, "userId is not a member of the organization"))
     _patch(monkeypatch, fake)
@@ -522,7 +553,7 @@ async def test_get_user_ai_credit_usage_error_path(monkeypatch: pytest.MonkeyPat
 
 
 # --------------------------------------------------------------------------
-# omni_get_user_group_ai_credit_usage
+# omni_get_entity_group_ai_credit_usage
 # --------------------------------------------------------------------------
 
 
@@ -533,36 +564,41 @@ ENTITY_GROUP_USAGE: dict[str, Any] = {
 }
 
 
-async def test_get_user_group_ai_credit_usage_markdown(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_get_entity_group_ai_credit_usage_markdown(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(payload=ENTITY_GROUP_USAGE)
     _patch(monkeypatch, fake)
 
-    result = await omni_get_user_group_ai_credit_usage(GetUserGroupAiCreditUsageInput(entities=[ENTITY]))
+    result = await omni_get_entity_group_ai_credit_usage(GetEntityGroupAiCreditUsageInput(entities=[ENTITY]))
 
     assert ENTITY in result
     assert "42" in result
     assert fake.calls == [("POST", "/v1/ai/credit-usage/entity-groups", {"json_body": {"entities": [ENTITY]}})]
 
 
-async def test_get_user_group_ai_credit_usage_json(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_get_entity_group_ai_credit_usage_json(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(payload=ENTITY_GROUP_USAGE)
     _patch(monkeypatch, fake)
 
-    result = await omni_get_user_group_ai_credit_usage(
-        GetUserGroupAiCreditUsageInput(entities=[ENTITY], response_format=ResponseFormat.JSON)
+    result = await omni_get_entity_group_ai_credit_usage(
+        GetEntityGroupAiCreditUsageInput(entities=[ENTITY], response_format=ResponseFormat.JSON)
     )
     payload = json.loads(result)
 
     assert payload["entityGroups"][0]["entity"] == ENTITY
 
 
-async def test_get_user_group_ai_credit_usage_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_get_entity_group_ai_credit_usage_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(exc=_http_error(403, "per-entity-group AI credit limits are not enabled"))
     _patch(monkeypatch, fake)
 
-    result = await omni_get_user_group_ai_credit_usage(GetUserGroupAiCreditUsageInput(entities=[ENTITY]))
+    result = await omni_get_entity_group_ai_credit_usage(GetEntityGroupAiCreditUsageInput(entities=[ENTITY]))
 
     assert result.startswith("Error (403):")
+
+
+def test_get_entity_group_ai_credit_usage_rejects_duplicate_entities() -> None:
+    with pytest.raises(ValueError):
+        GetEntityGroupAiCreditUsageInput(entities=[ENTITY, ENTITY])
 
 
 # --------------------------------------------------------------------------
