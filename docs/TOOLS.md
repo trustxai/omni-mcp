@@ -101,7 +101,7 @@ Destructive and idempotent hints travel with the tool itself; see the safety not
 
 | Tool | Access | Description |
 | --- | --- | --- |
-| `omni_export_dashboard` | read-only | Export a dashboard as a migration payload for another instance. |
+| `omni_export_dashboard` | writes | Export a dashboard as a migration payload for another instance. |
 | `omni_find_and_replace_content` | writes | Replace a view, field, or topic reference across every document on a model. |
 | `omni_get_content` | read-only | Retrieve a paginated list of documents and folders. |
 | `omni_import_dashboard` | writes | Import an exported dashboard into a model on this instance. |

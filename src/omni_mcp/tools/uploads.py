@@ -181,7 +181,8 @@ def _format_upload_item(item: Mapping[str, Any]) -> str:
     table_name = item.get("in_db_as_table_name") or "none (no table upload schema on this connection)"
     return (
         f"- **{item.get('file_name', 'unnamed')}** (`{item.get('id')}`) — view `{item.get('view_name')}`, "
-        f"connection `{item.get('connection_id')}`, table `{table_name}`, {size_text}, "
+        f"model `{item.get('model_id') or 'N/A'}`, connection `{item.get('connection_id')}`, "
+        f"table `{table_name}`, {size_text}, created {iso_or_na(item.get('created_at'))}, "
         f"updated {iso_or_na(item.get('updated_at'))}, uploaded by {uploader or 'unknown'}"
     )
 
@@ -440,7 +441,9 @@ async def omni_delete_upload(params: DeleteUploadInput) -> str:
         upload_id = quote(params.upload_id, safe="")
         payload = await get_client().request_json("DELETE", f"/v1/uploads/{upload_id}")
         body: dict[str, Any] = payload if isinstance(payload, dict) else {}
-        if body.get("success"):
+        # A 2xx with no body at all is a successful delete; only a body that
+        # carries `success` has to say `true`.
+        if not body or body.get("success"):
             return f"Deleted upload `{params.upload_id}`."
         return truncate_result(f"Delete request completed but the API did not confirm success: {to_json(body)}")
     except Exception as exc:

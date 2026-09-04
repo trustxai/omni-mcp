@@ -527,7 +527,7 @@ async def omni_create_connection(params: CreateConnectionInput) -> str:
         payload = await get_client().request_json("POST", "/v1/connections", json_body=body)
         result: dict[str, Any] = payload if isinstance(payload, dict) else {}
         connection_id = result.get("data", "unknown")
-        return f"Created connection **{params.name}** (`{params.dialect}`), id `{connection_id}`."
+        return truncate_result(f"Created connection **{params.name}** (`{params.dialect}`), id `{connection_id}`.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -671,7 +671,7 @@ async def omni_update_connection(params: UpdateConnectionInput) -> str:
             changed.append("environmentUserAttribute")
 
         await get_client().request_json("PATCH", f"/v1/connections/{_quote(params.connection_id)}", json_body=body)
-        return f"Updated connection `{params.connection_id}` — changed: {', '.join(changed)}."
+        return truncate_result(f"Updated connection `{params.connection_id}` — changed: {', '.join(changed)}.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -726,7 +726,7 @@ async def omni_delete_connection(params: DeleteConnectionInput) -> str:
     """
     try:
         await get_client().request_json("DELETE", f"/v1/connections/{_quote(params.connection_id)}")
-        return f"Archived connection `{params.connection_id}` (moved to trash)."
+        return truncate_result(f"Archived connection `{params.connection_id}` (moved to trash).")
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 410:
             return f"Connection `{params.connection_id}` is already archived (no action taken)."
@@ -892,7 +892,9 @@ async def omni_update_connection_environment(params: UpdateConnectionEnvironment
             json_body=body,
         )
         values = ", ".join(params.user_attribute_values)
-        return f"Updated connection environment `{params.connection_environment_id}` — values: {values}."
+        return truncate_result(
+            f"Updated connection environment `{params.connection_environment_id}` — values: {values}."
+        )
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -943,7 +945,7 @@ async def omni_delete_connection_environment(params: DeleteConnectionEnvironment
         await get_client().request_json(
             "DELETE", f"/v1/connection-environments/{_quote(params.connection_environment_id)}"
         )
-        return f"Deleted connection environment `{params.connection_environment_id}`."
+        return truncate_result(f"Deleted connection environment `{params.connection_environment_id}`.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -1246,7 +1248,9 @@ async def omni_update_schema_refresh_schedule(params: UpdateSchemaRefreshSchedul
         )
         result: dict[str, Any] = payload if isinstance(payload, dict) else {}
         description = result.get("description", "")
-        return f"Updated schema refresh schedule `{params.schedule_id}` — {description or params.schedule}."
+        return truncate_result(
+            f"Updated schema refresh schedule `{params.schedule_id}` — {description or params.schedule}."
+        )
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -1300,6 +1304,8 @@ async def omni_delete_schema_refresh_schedule(params: DeleteSchemaRefreshSchedul
             "DELETE",
             f"/v1/connections/{_quote(params.connection_id)}/schedules/{_quote(params.schedule_id)}",
         )
-        return f"Deleted schema refresh schedule `{params.schedule_id}` for connection `{params.connection_id}`."
+        return truncate_result(
+            f"Deleted schema refresh schedule `{params.schedule_id}` for connection `{params.connection_id}`."
+        )
     except Exception as exc:
         return handle_api_error(exc)

@@ -722,7 +722,7 @@ async def omni_get_model_yaml(params: GetModelYamlInput) -> str:
         rows = [
             {
                 "file": name,
-                "bytes": len(content) if isinstance(content, str) else 0,
+                "bytes": len(content.encode("utf-8")) if isinstance(content, str) else 0,
                 "checksum": checksums.get(name, "not requested"),
             }
             for name, content in files.items()

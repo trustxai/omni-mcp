@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
+from omni_mcp.config import get_settings
 from omni_mcp.formatters import ResponseFormat
 from omni_mcp.tools.content import (
     ExportDashboardInput,
@@ -452,10 +453,11 @@ def test_find_and_replace_requires_qualified_field_names() -> None:
         FindAndReplaceContentInput(
             model_id=MODEL_ID, find="old_field", replacement="orders.new_field", find_or_replace_type="FIELD"
         )
-    with pytest.raises(ValueError, match="Replacement field must be scoped"):
-        FindAndReplaceContentInput(
-            model_id=MODEL_ID, find="orders.old_field", replacement="new_field", find_or_replace_type="FIELD"
-        )
+    # `replacement` is NOT policed locally: only the `find` side is a documented
+    # 400, so an unqualified replacement reaches the API and gets its answer.
+    FindAndReplaceContentInput(
+        model_id=MODEL_ID, find="orders.old_field", replacement="new_field", find_or_replace_type="FIELD"
+    )
 
 
 # --------------------------------------------------------------------------- export dashboard
@@ -547,7 +549,7 @@ async def test_import_dashboard_inline_document(monkeypatch: pytest.MonkeyPatch)
     result = await omni_import_dashboard(
         ImportDashboardInput(
             base_model_id=MODEL_ID,
-            document=EXPORT_PAYLOAD,
+            export_payload=EXPORT_PAYLOAD,
             identifier="revenue-2026",
             folder_path="/Finance/Reports",
         )
@@ -613,10 +615,22 @@ async def test_import_dashboard_rejects_incomplete_payload(monkeypatch: pytest.M
     fake = _patch(monkeypatch, _FakeClient(payload=IMPORT_RESULT))
 
     result = await omni_import_dashboard(
-        ImportDashboardInput(base_model_id=MODEL_ID, document={"dashboard": {}, "exportVersion": "0.1"})
+        ImportDashboardInput(base_model_id=MODEL_ID, export_payload={"dashboard": {}, "exportVersion": "0.1"})
     )
 
     assert "missing required key(s)" in result
+    assert "workbookModel" in result
+    assert fake.calls == []
+
+
+async def test_import_dashboard_rejects_a_null_required_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key that is present but null is as unusable as a missing one."""
+    fake = _patch(monkeypatch, _FakeClient(payload=IMPORT_RESULT))
+
+    result = await omni_import_dashboard(
+        ImportDashboardInput(base_model_id=MODEL_ID, export_payload={**EXPORT_PAYLOAD, "workbookModel": None})
+    )
+
     assert "workbookModel" in result
     assert fake.calls == []
 
@@ -631,7 +645,7 @@ async def test_import_dashboard_error_path(monkeypatch: pytest.MonkeyPatch) -> N
         ),
     )
 
-    result = await omni_import_dashboard(ImportDashboardInput(base_model_id=MODEL_ID, document=EXPORT_PAYLOAD))
+    result = await omni_import_dashboard(ImportDashboardInput(base_model_id=MODEL_ID, export_payload=EXPORT_PAYLOAD))
 
     assert result.startswith("Error (403):")
 
@@ -640,7 +654,7 @@ def test_import_dashboard_requires_exactly_one_source() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         ImportDashboardInput(base_model_id=MODEL_ID)
     with pytest.raises(ValueError, match="exactly one"):
-        ImportDashboardInput(base_model_id=MODEL_ID, document=EXPORT_PAYLOAD, input_path="/tmp/export.json")
+        ImportDashboardInput(base_model_id=MODEL_ID, export_payload=EXPORT_PAYLOAD, input_path="/tmp/export.json")
 
 
 def test_content_inputs_reject_unknown_fields() -> None:
@@ -653,3 +667,37 @@ def test_content_inputs_reject_unknown_fields() -> None:
     ):
         with pytest.raises(ValueError):
             model(unexpected="x")  # type: ignore[call-arg]
+
+
+def test_export_dashboard_rejects_overwrite_without_a_path() -> None:
+    """`overwrite` alone reads as "replace the file" but nothing is ever written."""
+    with pytest.raises(ValueError, match="overwrite only applies"):
+        ExportDashboardInput(dashboard_id="12db1a0a", overwrite=True)
+
+
+async def test_export_dashboard_markdown_closes_its_fence_when_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The JSON is truncated inside the fence, so the fence still closes."""
+    monkeypatch.setenv("OMNI_MAX_RESULT_CHARS", "900")
+    get_settings.cache_clear()
+    _patch(monkeypatch, _FakeClient(payload={**EXPORT_PAYLOAD, "dashboard": {"filler": "x" * 5_000}}))
+
+    result = await omni_export_dashboard(ExportDashboardInput(dashboard_id="12db1a0a"))
+
+    assert result.endswith("```")
+    assert result.count("```") == 2
+    assert "truncated" in result
+    get_settings.cache_clear()
+
+
+async def test_get_content_maps_folder_id_to_the_folder_id_query_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`folder_id` is sent as `folderId`; the API rejects unrecognised query keys."""
+    fake = _patch(monkeypatch, _FakeClient(payload={"records": [], "pageInfo": {}}))
+
+    await omni_get_content(GetContentInput(folder_id="550e8400-e29b-41d4-a716-446655440000", include="labels"))
+
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["params"]["folderId"] == "550e8400-e29b-41d4-a716-446655440000"
+    assert "folder_id" not in kwargs["params"]
+    assert kwargs["params"]["include"] == "labels"

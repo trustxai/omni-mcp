@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from omni_mcp.formatters import ResponseFormat
 from omni_mcp.tools.users import (
@@ -303,7 +304,10 @@ async def test_list_users_json(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.loads(await omni_list_users(ListUsersInput(response_format=ResponseFormat.JSON)))
 
     assert payload["totalResults"] == 1
-    assert payload["resources"][0]["id"] == "9e8719d9-276a-4964-9395-a493189a247c"
+    # The SCIM envelope is passed through verbatim — `Resources` keeps its
+    # SCIM casing and `schemas` survives.
+    assert payload["Resources"][0]["id"] == "9e8719d9-276a-4964-9395-a493189a247c"
+    assert payload["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
 
 
 async def test_list_users_error_403(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -390,7 +394,8 @@ async def test_replace_user_success(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert "Replaced user **Blob Ross**" in result
-    assert "active: False" in result
+    # The API's own spelling, not Python's `False`.
+    assert "active: false" in result
     assert fake.calls == [
         (
             "PUT",
@@ -448,7 +453,7 @@ async def test_update_user_active_only(monkeypatch: pytest.MonkeyPatch) -> None:
     result = await omni_update_user(UpdateUserInput(user_id="uid-1", active=False))
 
     assert "Updated user" in result
-    assert "active: False" in result
+    assert "active: false" in result
     assert fake.calls == [
         (
             "PATCH",
@@ -484,10 +489,45 @@ async def test_update_user_raw_operations_override(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("omni_mcp.tools.users.get_client", lambda: fake)
 
     raw_ops = [{"op": "remove", "path": "displayName", "value": "ignored"}]
-    await omni_update_user(UpdateUserInput(user_id="uid-1", active=True, operations=raw_ops))
+    await omni_update_user(UpdateUserInput(user_id="uid-1", operations=raw_ops))
 
     _, _, kwargs = fake.calls[0]
     assert kwargs["json_body"]["Operations"] == raw_ops
+
+
+def test_update_user_rejects_a_raw_override_mixed_with_typed_fields() -> None:
+    """The override used to win silently, so the typed field was dropped unannounced."""
+    with pytest.raises(ValidationError, match="raw override"):
+        UpdateUserInput(
+            user_id="uid-1",
+            active=True,
+            operations=[{"op": "remove", "path": "displayName"}],
+        )
+
+
+def test_update_user_rejects_an_empty_operations_list() -> None:
+    """An explicit `[]` used to slip past the at-least-one guard and PATCH nothing."""
+    with pytest.raises(ValidationError):
+        UpdateUserInput(user_id="uid-1", operations=[])
+
+
+async def test_update_user_patches_user_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload=SCIM_USER)
+    monkeypatch.setattr("omni_mcp.tools.users.get_client", lambda: fake)
+
+    await omni_update_user(UpdateUserInput(user_id="uid-1", user_name="blob.ross@blobsrus.co"))
+
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"]["Operations"] == [
+        {"op": "replace", "path": "userName", "value": "blob.ross@blobsrus.co"}
+    ]
+
+
+def test_create_and_replace_user_reject_a_raw_override_mixed_with_typed_fields() -> None:
+    with pytest.raises(ValidationError, match="raw override"):
+        CreateUserInput(user_name="x@y.com", scim_body={"userName": "z@y.com"})
+    with pytest.raises(ValidationError, match="raw override"):
+        ReplaceUserInput(user_id="uid-1", active=False, scim_body={"userName": "z@y.com"})
 
 
 async def test_update_user_requires_at_least_one_field(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -571,7 +611,8 @@ async def test_list_embed_users_json(monkeypatch: pytest.MonkeyPatch) -> None:
 
     payload = json.loads(await omni_list_embed_users(ListEmbedUsersInput(response_format=ResponseFormat.JSON)))
 
-    assert payload["resources"][0]["embedExternalId"] == "blobby-manager"
+    assert payload["Resources"][0]["embedExternalId"] == "blobby-manager"
+    assert payload["schemas"] == ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
 
 
 async def test_list_embed_users_error(monkeypatch: pytest.MonkeyPatch) -> None:

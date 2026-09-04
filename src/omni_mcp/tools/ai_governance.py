@@ -111,7 +111,10 @@ def _suggestion_summary(item: Mapping[str, Any]) -> str:
 
 def _success_confirmation(body: Any, *, action: str, subject: str) -> str:
     """Short confirmation string for the `SuccessResponse`-shaped mutations."""
-    ok = body.get("success", True) if isinstance(body, dict) else True
+    # Only an explicit `success: false` contradicts the 2xx — the same rule the
+    # folder, model-git and document tools apply. An absent flag, an empty body
+    # and a non-JSON body all leave the mutation confirmed.
+    ok = body.get("success") is not False if isinstance(body, dict) else True
     if ok:
         return f"{action} {subject}."
     return f"{action.rstrip('.')} request for {subject} completed, but the API did not confirm success."

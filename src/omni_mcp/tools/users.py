@@ -8,12 +8,12 @@ not the cursor shape used elsewhere in this server — see `_scim_list_response`
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 from urllib.parse import quote
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omni_mcp.client import get_client
 from omni_mcp.errors import handle_api_error
@@ -31,6 +31,13 @@ PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 # ---------------------------------------------------------------------------
 # Shared rendering helpers
 # ---------------------------------------------------------------------------
+
+
+def _bool_text(value: Any) -> str:
+    """Render a SCIM boolean the way the API spells it — `true`/`false`, not Python's `True`/`False`."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "N/A" if value is None else str(value)
 
 
 def _emails_summary(body: Mapping[str, Any]) -> str:
@@ -83,7 +90,7 @@ def _render_scim_detail(
         f"- ID: `{body.get('id', 'unknown')}`",
         f"- userName: `{body.get('userName', 'unknown')}`",
         f"- displayName: **{body.get('displayName', 'unknown')}**",
-        f"- active: {body.get('active')}",
+        f"- active: {_bool_text(body.get('active'))}",
         f"- emails: {_emails_summary(body)}",
         f"- groups: {_groups_summary(body)}",
         f"- created: {iso_or_na(meta.get('created'))}",
@@ -101,7 +108,7 @@ def _render_scim_detail(
 def _format_user_row(item: Mapping[str, Any]) -> str:
     return (
         f"- **{item.get('displayName', 'unnamed')}** (`{item.get('id')}`) — "
-        f"userName `{item.get('userName', 'unknown')}`, active: {item.get('active')}"
+        f"userName `{item.get('userName', 'unknown')}`, active: {_bool_text(item.get('active'))}"
     )
 
 
@@ -109,7 +116,7 @@ def _format_embed_user_row(item: Mapping[str, Any]) -> str:
     return (
         f"- **{item.get('displayName', 'unnamed')}** (`{item.get('id')}`) — "
         f"embedExternalId `{item.get('embedExternalId', 'unknown')}`, "
-        f"entity `{item.get('embedEntity', 'unknown')}`, active: {item.get('active')}"
+        f"entity `{item.get('embedEntity', 'unknown')}`, active: {_bool_text(item.get('active'))}"
     )
 
 
@@ -124,7 +131,7 @@ def _scim_list_response(
     title: str,
     body: Mapping[str, Any],
     fmt: ResponseFormat,
-    item_formatter: Any,
+    item_formatter: Callable[[Mapping[str, Any]], str],
 ) -> str:
     """Render a SCIM `ListResponse` envelope (`Resources`/`totalResults`/`startIndex`/`itemsPerPage`).
 
@@ -132,24 +139,16 @@ def _scim_list_response(
     `startIndex`/`count` rather than an opaque cursor, so the "next page" hint
     is the arithmetic `startIndex + itemsPerPage`.
     """
-    resources = body.get("Resources") or []
+    raw_resources = body.get("Resources")
+    resources = [item for item in raw_resources if isinstance(item, Mapping)] if isinstance(raw_resources, list) else []
     total = body.get("totalResults")
     per_page = body.get("itemsPerPage")
     start_index = body.get("startIndex")
 
     if fmt is ResponseFormat.JSON:
-        return truncate_result(
-            to_json(
-                {
-                    "title": title,
-                    "count": len(resources),
-                    "totalResults": total,
-                    "itemsPerPage": per_page,
-                    "startIndex": start_index,
-                    "resources": resources,
-                }
-            )
-        )
+        # The SCIM envelope is returned verbatim — `Resources`, `schemas` and
+        # all — so a caller can hand it straight to a SCIM-aware consumer.
+        return truncate_result(to_json(body))
 
     lines = [f"# {title}", ""]
     if isinstance(total, int):
@@ -282,10 +281,20 @@ class CreateUserInput(BaseModel):
     scim_body: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Raw SCIM request body override. When provided, it is sent verbatim instead of the "
-            "body built from `user_name`/`display_name`/`user_attributes`."
+            "Raw SCIM request body override, sent verbatim. Mutually exclusive with "
+            "`user_name`/`display_name`/`user_attributes`."
         ),
     )
+
+    @model_validator(mode="after")
+    def _reject_a_mixed_override(self) -> CreateUserInput:
+        if self.scim_body is not None and (
+            self.user_name is not None or self.display_name is not None or self.user_attributes is not None
+        ):
+            raise ValueError(
+                "scim_body is a raw override: send it on its own, without user_name, display_name or user_attributes."
+            )
+        return self
 
 
 @mcp.tool(
@@ -340,7 +349,7 @@ async def omni_create_user(params: CreateUserInput) -> str:
         result: dict[str, Any] = payload if isinstance(payload, dict) else {}
         display_name = result.get("displayName", params.display_name or "unknown")
         user_id = result.get("id", "unknown")
-        return f"Created user **{display_name}** (id `{user_id}`)."
+        return truncate_result(f"Created user **{display_name}** (id `{user_id}`).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -520,11 +529,22 @@ class ReplaceUserInput(BaseModel):
     )
     scim_body: dict[str, Any] | None = Field(
         default=None,
-        description=(
-            "Raw SCIM request body override. When provided, it is sent verbatim instead of the "
-            "body built from the fields above."
-        ),
+        description=("Raw SCIM request body override, sent verbatim. Mutually exclusive with the fields above."),
     )
+
+    @model_validator(mode="after")
+    def _reject_a_mixed_override(self) -> ReplaceUserInput:
+        if self.scim_body is not None and (
+            self.user_name is not None
+            or self.display_name is not None
+            or self.active is not None
+            or self.user_attributes is not None
+        ):
+            raise ValueError(
+                "scim_body is a raw override: send it on its own, without user_name, display_name, "
+                "active or user_attributes."
+            )
+        return self
 
 
 @mcp.tool(
@@ -585,7 +605,7 @@ async def omni_replace_user(params: ReplaceUserInput) -> str:
         display_name = result.get("displayName", params.display_name or "unknown")
         user_id = result.get("id", params.user_id)
         active = result.get("active")
-        return f"Replaced user **{display_name}** (id `{user_id}`) — active: {active}."
+        return truncate_result(f"Replaced user **{display_name}** (id `{user_id}`) — active: {_bool_text(active)}.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -610,17 +630,37 @@ class UpdateUserInput(BaseModel):
         ),
     )
     display_name: str | None = Field(default=None, description="Replace the user's display name.")
+    user_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Replace the user's `userName` (their email address); sent as a `replace` op on path `userName`.",
+    )
     user_attributes: dict[str, Any] | None = Field(
         default=None,
         description=f"Replace the user's attributes (`{USER_ATTRIBUTE_URN}`), keyed by attribute Reference ID.",
     )
     operations: list[dict[str, Any]] | None = Field(
         default=None,
+        min_length=1,
         description=(
             "Raw SCIM `Operations` list override (each `{op, path?, value}`, per RFC 7644 "
-            "§3.5.2). When provided, it replaces all operations built from the fields above."
+            "§3.5.2). Mutually exclusive with the fields above; must hold at least one operation."
         ),
     )
+
+    @model_validator(mode="after")
+    def _reject_a_mixed_override(self) -> UpdateUserInput:
+        if self.operations is not None and (
+            self.active is not None
+            or self.display_name is not None
+            or self.user_name is not None
+            or self.user_attributes is not None
+        ):
+            raise ValueError(
+                "operations is a raw override: send it on its own, without active, display_name, "
+                "user_name or user_attributes."
+            )
+        return self
 
 
 @mcp.tool(
@@ -638,8 +678,9 @@ async def omni_update_user(params: UpdateUserInput) -> str:
 
     Unlike `omni_replace_user`, attributes not referenced by an operation are
     left unchanged. Builds the SCIM `Operations` list from `active`,
-    `display_name`, and `user_attributes` (as `replace` operations), or sends
-    `operations` verbatim when provided.
+    `display_name`, `user_name`, and `user_attributes` (as `replace`
+    operations), or sends `operations` verbatim when provided — `operations` is
+    a raw override and cannot be combined with those fields.
 
     Omni does not have a reversible "deactivated" state: setting `active` to
     `false` revokes the user's membership permanently — their schedules are
@@ -662,6 +703,7 @@ async def omni_update_user(params: UpdateUserInput) -> str:
     Examples:
     - `{"params": {"user_id": "9e8719d9-276a-4964-9395-a493189a247c", "active": false}}`
     - `{"params": {"user_id": "9e8719d9-276a-4964-9395-a493189a247c", "display_name": "Blob Ross"}}`
+    - `{"params": {"user_id": "9e8719d9-276a-4964-9395-a493189a247c", "user_name": "blob.ross@blobsrus.co"}}`
     - `{"params": {"user_id": "9e8719d9-276a-4964-9395-a493189a247c", "operations": [{"op": "replace", "path": "active", "value": false}]}}`
 
     Error Handling:
@@ -677,10 +719,12 @@ async def omni_update_user(params: UpdateUserInput) -> str:
                 operations.append({"op": "replace", "path": "active", "value": params.active})
             if params.display_name is not None:
                 operations.append({"op": "replace", "path": "displayName", "value": params.display_name})
+            if params.user_name is not None:
+                operations.append({"op": "replace", "path": "userName", "value": params.user_name})
             if params.user_attributes is not None:
                 operations.append({"op": "replace", "path": USER_ATTRIBUTE_URN, "value": params.user_attributes})
             if not operations:
-                return "Error: provide at least one of active, display_name, user_attributes, or operations."
+                return "Error: provide at least one of active, display_name, user_name, user_attributes, or operations."
         body = {"schemas": [PATCH_OP_SCHEMA], "Operations": operations}
         path = f"/scim/v2/users/{quote(params.user_id, safe='')}"
         payload = await get_client().request_json("PATCH", path, json_body=body)
@@ -688,7 +732,7 @@ async def omni_update_user(params: UpdateUserInput) -> str:
         display_name = result.get("displayName", params.display_name or "unknown")
         user_id = result.get("id", params.user_id)
         active = result.get("active")
-        return f"Updated user **{display_name}** (id `{user_id}`) — active: {active}."
+        return truncate_result(f"Updated user **{display_name}** (id `{user_id}`) — active: {_bool_text(active)}.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -748,7 +792,7 @@ async def omni_delete_user(params: DeleteUserInput) -> str:
     try:
         path = f"/scim/v2/users/{quote(params.user_id, safe='')}"
         await get_client().request_json("DELETE", path)
-        return f"Deleted user (id `{params.user_id}`)."
+        return truncate_result(f"Deleted user (id `{params.user_id}`).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -941,6 +985,6 @@ async def omni_delete_embed_user(params: DeleteEmbedUserInput) -> str:
     try:
         path = f"/scim/v2/embed/users/{quote(params.user_id, safe='')}"
         await get_client().request_json("DELETE", path)
-        return f"Deleted embed user (id `{params.user_id}`)."
+        return truncate_result(f"Deleted embed user (id `{params.user_id}`).")
     except Exception as exc:
         return handle_api_error(exc)

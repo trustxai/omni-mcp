@@ -394,10 +394,31 @@ async def test_move_document_to_folder(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_move_document_to_root_sends_null_folder_path(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _patch(monkeypatch, _FakeClient(payload={"success": True}))
 
-    result = await omni_move_document(MoveDocumentInput(document_id="abc123"))
+    result = await omni_move_document(MoveDocumentInput(document_id="abc123", to_root=True))
 
     assert "the root level" in result
+    # `to_root` is the only way to get here, and it sends an explicit null.
     assert fake.calls == [("PUT", "/v1/documents/abc123/move", {"json_body": {"folderPath": None}})]
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"]["folderPath"] is None
+
+
+def test_move_document_requires_an_explicit_destination() -> None:
+    """A scope-only move used to relocate the document to the root level."""
+    with pytest.raises(ValueError, match="exactly one of folder_path or to_root"):
+        MoveDocumentInput(document_id="abc123", scope="organization")
+    with pytest.raises(ValueError, match="exactly one of folder_path or to_root"):
+        MoveDocumentInput(document_id="abc123", folder_path="/reports", to_root=True)
+
+
+async def test_duplicate_document_drops_an_empty_folder_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`folderPath: ""` is a 404; an empty path means "no folder given"."""
+    fake = _patch(monkeypatch, _FakeClient(payload={"identifier": "new1", "name": "Copy"}))
+
+    await omni_duplicate_document(DuplicateDocumentInput(document_id="abc123", name="Copy", folder_path="   "))
+
+    _, _, kwargs = fake.calls[0]
+    assert "folderPath" not in kwargs["json_body"]
 
 
 async def test_move_document_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -496,7 +517,7 @@ async def test_upgrade_dashboard_layout_noop(monkeypatch: pytest.MonkeyPatch) ->
     result = await omni_upgrade_dashboard_layout(UpgradeDashboardLayoutInput(document_id="abc123"))
 
     assert "already uses the advanced dashboard layout" in result
-    assert fake.calls == [("POST", "/v1/documents/abc123/upgrade", {"json_body": {}})]
+    assert fake.calls == [("POST", "/v1/documents/abc123/upgrade", {"json_body": None})]
 
 
 async def test_upgrade_dashboard_layout_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,7 +591,7 @@ async def test_create_document_draft_without_branch(monkeypatch: pytest.MonkeyPa
 
     await omni_create_document_draft(CreateDocumentDraftInput(document_id="abc123"))
 
-    assert fake.calls == [("POST", "/v1/documents/abc123/draft", {"json_body": {}})]
+    assert fake.calls == [("POST", "/v1/documents/abc123/draft", {"json_body": None})]
 
 
 async def test_create_document_draft_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -597,7 +618,7 @@ async def test_archive_document_draft_without_branch(monkeypatch: pytest.MonkeyP
 
     await omni_archive_document_draft(ArchiveDocumentDraftInput(document_id="abc123"))
 
-    assert fake.calls == [("DELETE", "/v1/documents/abc123/draft", {"json_body": {}})]
+    assert fake.calls == [("DELETE", "/v1/documents/abc123/draft", {"json_body": None})]
 
 
 async def test_archive_document_draft_error_path(monkeypatch: pytest.MonkeyPatch) -> None:

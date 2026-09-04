@@ -56,7 +56,9 @@ def test_main_prints_the_table_and_exits_zero(capsys: pytest.CaptureFixture[str]
     assert "tools across" in captured.out
     assert "| Tool | Access | Description |" in captured.out
     assert "### `health`" in captured.out
-    assert "unknown" not in captured.out
+    # No unattributed-tools section — a tool description may legitimately say
+    # "unknown", so this asserts on the heading the fallback module would print.
+    assert "### `unknown`" not in captured.out
 
 
 def test_main_exits_non_zero_and_prints_nothing_on_a_mismatch(

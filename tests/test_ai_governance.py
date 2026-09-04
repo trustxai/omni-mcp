@@ -1035,3 +1035,15 @@ def test_id_fields_reject_empty_strings() -> None:
         DeleteModelSuggestionInput(model_id="", suggestion_id=SUGGESTION_ID)
     with pytest.raises(ValueError):
         GetSuggestionRunStatusInput(model_id=MODEL_ID, run_id="")
+
+
+def test_success_confirmation_reports_an_explicit_failure_flag() -> None:
+    """Only `success: false` contradicts the 2xx — the house convention elsewhere."""
+    from omni_mcp.tools.ai_governance import _success_confirmation
+
+    assert _success_confirmation({"success": True}, action="Deleted", subject="x") == "Deleted x."
+    # No body at all (204/parsed away) is still a success…
+    assert _success_confirmation(None, action="Deleted", subject="x") == "Deleted x."
+    assert _success_confirmation({}, action="Deleted", subject="x") == "Deleted x."
+    # …and only an explicit `success: false` contradicts the 2xx.
+    assert "did not confirm success" in _success_confirmation({"success": False}, action="Deleted", subject="x")
