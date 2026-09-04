@@ -7,14 +7,13 @@ touch this file — eliminating merge conflicts.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+def register_all() -> None:
+    """Import every tool module; @mcp.tool decorators self-register on import.
 
-
-def register_all(mcp: FastMCP) -> None:
-    """Import every tool module; @mcp.tool decorators self-register on import."""
+    Takes no argument: modules decorate against the single server instance,
+    `omni_mcp.server.mcp`, which they import directly.
+    """
     from omni_mcp.tools import (  # noqa: F401
         ai,
         ai_governance,

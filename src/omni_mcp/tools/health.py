@@ -7,40 +7,32 @@ Lane workers: copy this module's shape (input model, decorator + annotations,
 
 from __future__ import annotations
 
+import pkgutil
 from typing import Any
 
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
+import omni_mcp.tools
 from omni_mcp.client import get_client
 from omni_mcp.config import get_settings
 from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, to_json, truncate_result
 from omni_mcp.server import mcp
 
-#: Every lane module that `register_all` imports, reported by `omni_get_api_info`.
-TOOL_MODULES: tuple[str, ...] = (
-    "ai",
-    "ai_governance",
-    "ai_routines_evals",
-    "connections",
-    "content",
-    "dashboards",
-    "dbt",
-    "document_access",
-    "documents",
-    "documents_v2",
-    "folders",
-    "health",
-    "identity",
-    "model_git",
-    "models",
-    "queries",
-    "schedules",
-    "uploads",
-    "user_groups",
-    "users",
-)
+
+def _discover_tool_modules() -> tuple[str, ...]:
+    """Every module in `omni_mcp.tools` — the same set `register_all` imports.
+
+    Discovered rather than hand-listed so this never drifts as modules land.
+    """
+    return tuple(
+        sorted(name for _, name, _ in pkgutil.iter_modules(omni_mcp.tools.__path__) if not name.startswith("_"))
+    )
+
+
+#: Every tool module in this server, reported by `omni_get_api_info`.
+TOOL_MODULES: tuple[str, ...] = _discover_tool_modules()
 
 
 class HealthCheckInput(BaseModel):
