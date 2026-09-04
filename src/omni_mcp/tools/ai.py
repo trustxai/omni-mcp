@@ -37,6 +37,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "AI jobs, conversations, query generation, topic picking, docs search"
+
 #: States after which polling stops — the job will not change again.
 TERMINAL_JOB_STATES: frozenset[str] = frozenset({"CANCELLED", "COMPLETE", "FAILED"})
 

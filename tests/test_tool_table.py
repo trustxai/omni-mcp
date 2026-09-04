@@ -1,4 +1,4 @@
-"""Unit tests for `scripts/tool_table.py`, the generator behind the README table."""
+"""Unit tests for `scripts/tool_table.py`, the generator behind the README catalogue."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from types import ModuleType
 import pytest
 
 from omni_mcp.server import mcp
+from omni_mcp.tools import available_tool_modules
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "tool_table.py"
 
@@ -73,3 +74,75 @@ def test_main_exits_non_zero_and_prints_nothing_on_a_mismatch(
     assert captured.out == ""
     assert "cannot attribute" in captured.err
     assert "omni_health_check" in captured.err
+
+
+async def test_the_catalogue_covers_every_module_in_the_package() -> None:
+    rows = await tool_table.catalogue()
+
+    assert [module for module, _, _ in rows] == list(available_tool_modules())
+    assert all(count > 0 for _, count, _ in rows), "a module with no tools would be a registration bug"
+    assert all(summary for _, _, summary in rows)
+    assert sum(count for _, count, _ in rows) == len(await mcp.list_tools())
+
+
+async def test_a_module_without_a_summary_is_reported() -> None:
+    summaries = tool_table.module_summaries()
+
+    assert set(summaries) == set(available_tool_modules())
+
+    import omni_mcp.tools.health as health
+
+    original = health.MODULE_SUMMARY
+    try:
+        health.MODULE_SUMMARY = "   "
+        with pytest.raises(tool_table.ModuleSummaryError) as excinfo:
+            tool_table.module_summaries()
+    finally:
+        health.MODULE_SUMMARY = original
+
+    assert excinfo.value.module_names == ["health"]
+    assert "MODULE_SUMMARY" in str(excinfo.value)
+
+
+async def test_readme_catalogue_block_is_in_sync() -> None:
+    """The README block is generated; a hand edit (or a new tool) must fail here.
+
+    This is the only check that runs in CI — the gate's `scripts/tool_table.py`
+    invocation is a local step — so without it the catalogue would silently rot.
+    """
+    expected = tool_table.render_catalogue(await tool_table.catalogue())
+
+    current = tool_table.extract_block(tool_table.README.read_text(encoding="utf-8"))
+
+    assert current == expected, "stale README catalogue — run `uv run python scripts/tool_table.py --write`"
+
+
+def test_replacing_the_block_needs_both_markers() -> None:
+    with pytest.raises(ValueError, match="TOOL_MODULES_START"):
+        tool_table.extract_block("# README\n\nno markers here\n")
+
+
+def test_write_mode_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text(f"# x\n\n{tool_table.CATALOGUE_START}\nstale\n{tool_table.CATALOGUE_END}\n\ntail\n")
+    monkeypatch.setattr(tool_table, "README", readme)
+
+    assert tool_table.main(["--write"]) == 0
+    first = readme.read_text()
+    assert tool_table.main(["--write"]) == 0
+
+    assert readme.read_text() == first
+    assert "stale" not in first
+    assert first.startswith("# x\n")
+    assert first.endswith("tail\n")
+    assert "| `health` | 2 |" in first
+
+
+def test_catalogue_mode_prints_the_block(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = tool_table.main(["--catalogue"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "| Module | Tools | Covers |" in captured.out
+    assert "| `health` | 2 | Local diagnostics" in captured.out

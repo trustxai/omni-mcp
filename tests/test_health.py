@@ -10,8 +10,8 @@ import pytest
 
 from omni_mcp.config import get_settings
 from omni_mcp.formatters import ResponseFormat
+from omni_mcp.tools import available_tool_modules, registered_tool_modules
 from omni_mcp.tools.health import (
-    TOOL_MODULES,
     ApiInfoInput,
     HealthCheckInput,
     omni_get_api_info,
@@ -138,8 +138,29 @@ async def test_api_info_reports_configuration(configured: None) -> None:
     assert "API key: configured" in result
     assert "secret-key" not in result
     assert "60 requests/minute" in result
-    for module in TOOL_MODULES:
+    assert f"## Tool modules ({len(registered_tool_modules())})" in result
+    for module in registered_tool_modules():
         assert f"`{module}`" in result
+
+
+async def test_api_info_reports_the_registered_set_when_it_is_narrowed(
+    monkeypatch: pytest.MonkeyPatch, configured: None
+) -> None:
+    """With a filter active the report must not claim the whole package.
+
+    `omni_get_api_info` is what a reader calls to find out which tools exist
+    here; naming the modules that were left out keeps it useful without making
+    it lie.
+    """
+    monkeypatch.setattr("omni_mcp.tools.health.registered_tool_modules", lambda: ("health", "queries"))
+
+    result = await omni_get_api_info(ApiInfoInput())
+
+    assert f"## Tool modules (2 of {len(available_tool_modules())} registered)" in result
+    assert "`health`, `queries`" in result
+    assert "Filtered by `OMNI_TOOL_MODULES`" in result
+    assert "Not registered: `ai`" in result
+    assert "`models`" in result
 
 
 async def test_api_info_without_configuration() -> None:
@@ -168,7 +189,7 @@ async def test_api_info_survives_an_invalid_base_url(misconfigured: None) -> Non
     # …the failing variable is named rather than assumed…
     assert "Rejected setting(s): `OMNI_BASE_URL`" in result
     # …and the tool still answers the rest of the question.
-    for module in TOOL_MODULES:
+    for module in registered_tool_modules():
         assert f"`{module}`" in result
 
 

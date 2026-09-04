@@ -20,6 +20,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, cursor_paginated_response, markdown_table, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Folders, folder permissions, folder labels, labels"
+
 FolderScope = Literal["organization", "restricted"]
 FolderSortField = Literal["favorites", "name", "path"]
 SortDirection = Literal["asc", "desc"]

@@ -49,6 +49,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Git configuration, sync, branch pull requests, merges"
+
 #: Substrings (lower-cased, underscores stripped) that mark a value as a secret.
 SENSITIVE_KEY_PARTS: tuple[str, ...] = ("token", "secret", "password", "passphrase", "privatekey")
 

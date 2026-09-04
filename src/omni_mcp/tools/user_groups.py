@@ -20,6 +20,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, iso_or_na, markdown_table, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "User groups and user/group model roles"
+
 #: SCIM schema URI required on every PATCH /scim/v2/groups/{id} request body.
 PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 

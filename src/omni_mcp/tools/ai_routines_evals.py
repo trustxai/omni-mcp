@@ -34,6 +34,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Scheduled AI routines, eval prompt sets and runs"
+
 
 def _quote(value: str) -> str:
     """Percent-encode a path segment (ids may contain characters unsafe for a URL)."""

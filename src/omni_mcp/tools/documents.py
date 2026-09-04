@@ -39,6 +39,9 @@ from omni_mcp.formatters import (
 )
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Documents v1 — list, read, queries, drafts, move, duplicate, ownership"
+
 #: Values accepted by the `include` query parameter of `GET /v1/documents`.
 DocumentInclude = Literal["_count", "labels", "includeDeleted", "onlyFavorites", "onlySharedWithMe"]
 

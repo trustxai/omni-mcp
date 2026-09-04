@@ -56,6 +56,7 @@ key.
 | `OMNI_REQUEST_TIMEOUT_SECONDS` | no | `60` | Per-request timeout in seconds. |
 | `OMNI_MAX_RETRIES` | no | `3` | Extra attempts on `429` (honouring `Retry-After`) and `502/503/504`. |
 | `OMNI_MAX_RESULT_CHARS` | no | `900000` | Result-size budget in **UTF-8 bytes**; longer results are truncated with a visible marker, keeping them under the MCP 1 MB limit. |
+| `OMNI_TOOL_MODULES` | no | *(empty — everything)* | Comma-separated allowlist of [tool modules](#tools) to register, e.g. `models,model_git,queries`. See [Selecting tool modules](#selecting-tool-modules). |
 
 ### Getting an API key
 
@@ -82,6 +83,31 @@ Use an Organization API key for those. The API is rate limited to **60 requests 
 key**, and instances can ask Omni to raise it (up to 500 requests/minute is documented); the client
 honours `Retry-After` either way. Start a session with `omni_health_check` to confirm the key works
 and `omni_whoami` to see exactly what it can reach.
+
+### Selecting tool modules
+
+Every tool's schema travels with **every** request the client makes, and the full set is not small:
+198 tools serialise to **685,960 bytes** of tool schemas. `OMNI_TOOL_MODULES` buys that context back
+— a comma-separated allowlist of the modules in the [catalogue below](#tools). Unset or empty
+registers all of them, exactly as before.
+
+```bash
+# Modelling: branch a model, edit and validate its YAML, run queries, open the PR.
+OMNI_TOOL_MODULES=models,model_git,queries,content,health   # 34 tools, 140,749 bytes
+
+# Administration: people, groups, model roles, connections and deliveries.
+OMNI_TOOL_MODULES=users,user_groups,identity,connections,schedules,health   # 55 tools, 180,799 bytes
+```
+
+Those two are **examples, not presets**. The package deliberately ships no named bundles: which
+tools an agent should see is policy, it differs per person and per task, and a bundle frozen into a
+release would go stale while the client config is one line away from saying exactly what you want.
+
+Entries are trimmed and empty ones ignored, so `models, ,queries,` is just `models,queries`. An
+unknown name is a **startup error** that names the offending entry and lists the valid modules —
+never a silent skip, which would leave you hunting for a tool that was never registered. Keeping
+`health` in a narrowed set is worth it: `omni_get_api_info` reports the modules that are actually
+registered (and names the ones that are not), so the filter stays visible from inside the session.
 
 ## Client configuration
 
@@ -162,33 +188,34 @@ Copy [`.env.example`](.env.example) to `.env` first. In a client config, the com
 
 ## Tools
 
-<!-- TOOL_TABLE_START -->
-**198** tools across **20** modules. The full generated reference — every tool, its access mode and
-its one-line description — is in [docs/TOOLS.md](docs/TOOLS.md).
+<!-- TOOL_MODULES_START -->
+**198** tools across **20** modules, and every one of them is registered unless
+[`OMNI_TOOL_MODULES`](#selecting-tool-modules) says otherwise. The full generated reference —
+every tool, its access mode and its one-line description — is in [docs/TOOLS.md](docs/TOOLS.md).
 
-| Module | Tools | Covers | Highlights |
-| --- | --- | --- | --- |
-| `ai` | 11 | AI jobs, conversations, query generation, topic picking, docs search | `omni_ask_ai`, `omni_generate_query`, `omni_search_omni_docs` |
-| `ai_governance` | 17 | AI credit controls and usage, model suggestions | `omni_get_ai_credit_controls`, `omni_set_user_ai_credit_limits`, `omni_list_model_suggestions` |
-| `ai_routines_evals` | 18 | Scheduled AI routines, eval prompt sets and runs | `omni_create_ai_routine`, `omni_trigger_ai_routine`, `omni_start_eval_run` |
-| `connections` | 13 | Database connections, environments, schema refresh schedules | `omni_list_connections`, `omni_update_connection`, `omni_create_schema_refresh_schedule` |
-| `content` | 6 | Content search, the content validator, dashboard export/import | `omni_validate_content`, `omni_find_and_replace_content`, `omni_export_dashboard` |
-| `dashboards` | 6 | Dashboard downloads (PDF/CSV/…) and dashboard filters | `omni_export_dashboard_file`, `omni_get_dashboard_filters`, `omni_update_dashboard_filters` |
-| `dbt` | 9 | dbt configuration, environments, exposures | `omni_get_dbt_configuration`, `omni_create_dbt_environment`, `omni_get_dbt_exposures` |
-| `document_access` | 12 | Document permissions, favorites, labels | `omni_list_document_access`, `omni_grant_document_permissions`, `omni_bulk_update_document_labels` |
-| `documents` | 13 | Documents v1 — list, read, queries, drafts, move, duplicate, ownership | `omni_list_documents`, `omni_get_document_queries`, `omni_transfer_document_ownership` |
-| `documents_v2` | 7 | Documents v2 — create, draft, patch, publish, read state | `omni_create_document_v2`, `omni_patch_document_draft`, `omni_publish_document_draft` |
-| `folders` | 14 | Folders, folder permissions, folder labels, labels | `omni_list_folders`, `omni_create_folder`, `omni_grant_folder_permissions` |
-| `health` | 2 | Local diagnostics — configuration and connectivity | `omni_health_check`, `omni_get_api_info` |
-| `identity` | 6 | Who am I, API tokens, user attribute definitions | `omni_whoami`, `omni_list_api_tokens`, `omni_list_user_attributes` |
-| `model_git` | 7 | Git configuration, sync, branch pull requests, merges | `omni_sync_model_with_git`, `omni_create_or_update_model_branch_pull_request`, `omni_merge_model_branch` |
-| `models` | 16 | Models, model YAML, validation, schemas, cache, topics | `omni_get_model_yaml`, `omni_update_model_yaml`, `omni_validate_model` |
-| `queries` | 3 | Running queries and reading their results | `omni_run_query`, `omni_wait_for_query_results`, `omni_get_job_status` |
-| `schedules` | 14 | Scheduled deliveries, alerts, recipients, email-only users | `omni_list_schedules`, `omni_create_schedule`, `omni_trigger_schedule` |
-| `uploads` | 4 | CSV uploads (data input tables) | `omni_upload_csv`, `omni_replace_upload_data`, `omni_list_uploads` |
-| `user_groups` | 10 | User groups and user/group model roles | `omni_create_user_group`, `omni_assign_user_model_role`, `omni_get_user_group_model_roles` |
-| `users` | 10 | Standard, embed and email-only users (SCIM) | `omni_list_users`, `omni_create_user`, `omni_list_embed_users` |
-<!-- TOOL_TABLE_END -->
+| Module | Tools | Covers |
+| --- | --- | --- |
+| `ai` | 11 | AI jobs, conversations, query generation, topic picking, docs search |
+| `ai_governance` | 17 | AI credit controls and usage, model suggestions |
+| `ai_routines_evals` | 18 | Scheduled AI routines, eval prompt sets and runs |
+| `connections` | 13 | Database connections, environments, schema refresh schedules |
+| `content` | 6 | Content search, the content validator, dashboard export/import |
+| `dashboards` | 6 | Dashboard downloads (PDF/CSV/…) and dashboard filters |
+| `dbt` | 9 | dbt configuration, environments, exposures |
+| `document_access` | 12 | Document permissions, favorites, labels |
+| `documents` | 13 | Documents v1 — list, read, queries, drafts, move, duplicate, ownership |
+| `documents_v2` | 7 | Documents v2 — create, draft, patch, publish, read state |
+| `folders` | 14 | Folders, folder permissions, folder labels, labels |
+| `health` | 2 | Local diagnostics — configuration and connectivity |
+| `identity` | 6 | Who am I, API tokens, user attribute definitions |
+| `model_git` | 7 | Git configuration, sync, branch pull requests, merges |
+| `models` | 16 | Models, model YAML, validation, schemas, cache, topics |
+| `queries` | 3 | Running queries and reading their results |
+| `schedules` | 14 | Scheduled deliveries, alerts, recipients, email-only users |
+| `uploads` | 4 | CSV uploads (data input tables) |
+| `user_groups` | 10 | User groups and user/group model roles |
+| `users` | 10 | Standard, embed and email-only users (SCIM) |
+<!-- TOOL_MODULES_END -->
 
 Start with `omni_health_check` to confirm the key works, and `omni_get_api_info` to see how the
 server is configured.
@@ -282,7 +309,13 @@ uv run ruff check src/ tests/ scripts/
 uv run ruff format --check src/ tests/ scripts/
 uv run mypy src/
 uv run python scripts/tool_table.py
+uv run python scripts/tool_table.py --write   # regenerate the module catalogue above
 ```
+
+The catalogue in [Tools](#tools) is generated from the live registry — the counts and the `Covers`
+column come from each module's `MODULE_SUMMARY`, and a test fails if the block drifts from what the
+generator produces. It always lists every module in the package, whatever `OMNI_TOOL_MODULES` is set
+to locally.
 
 Live tests (`-m live`) run against a real instance and are skipped unless `OMNI_API_KEY` is set;
 copy `.env.example` to `.env` to enable them. [CONTRIBUTING.md](CONTRIBUTING.md) is the contract

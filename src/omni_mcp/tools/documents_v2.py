@@ -30,6 +30,9 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: One line on what this module covers, for the generated README catalogue.
+MODULE_SUMMARY = "Documents v2 — create, draft, patch, publish, read state"
+
 #: A single patch may carry at most this many non-null query presentations.
 MAX_QUERY_PRESENTATIONS_PER_PATCH = 48
 

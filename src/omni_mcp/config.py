@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     # backwards compatibility; the budget has always been about payload size.)
     omni_max_result_chars: int = 900_000
 
+    # Comma-separated allowlist of tool modules to register, e.g.
+    # `models,model_git,queries`. Empty — the default — registers every module,
+    # which is what every existing deployment expects. Narrowing it is about
+    # context: every registered tool's schema travels with every request.
+    #
+    # Kept as the raw string, with `tool_modules` doing the parsing, for the
+    # same reason `omni_base_url` keeps its raw value: pydantic-settings would
+    # try to JSON-decode a `tuple[str, ...]` field coming from the environment,
+    # so `OMNI_TOOL_MODULES=models,queries` would fail to load at all.
+    omni_tool_modules: str = ""
+
     @field_validator("omni_base_url")
     @classmethod
     def _validate_base_url(cls, value: str) -> str:
@@ -66,6 +77,31 @@ class Settings(BaseSettings):
                 "(tools supply the rest of the path, e.g. /v1/users), got: " + raw
             )
         return raw
+
+    @field_validator("omni_tool_modules")
+    @classmethod
+    def _validate_tool_modules(cls, value: str) -> str:
+        """Reject an allowlist entry that names no module, at load time.
+
+        Validating here rather than at registration is what makes a typo a
+        startup error naming the offender, instead of a server that quietly
+        exposes fewer tools than asked for.
+        """
+        from omni_mcp.tools import parse_tool_modules
+
+        parse_tool_modules(value)
+        return value.strip()
+
+    @property
+    def tool_modules(self) -> tuple[str, ...]:
+        """The parsed allowlist. Empty means "register every module".
+
+        Import is deferred to keep the config layer free of a module-level
+        dependency on the tool package, which imports this module back.
+        """
+        from omni_mcp.tools import parse_tool_modules
+
+        return parse_tool_modules(self.omni_tool_modules)
 
     @property
     def api_root(self) -> str:
