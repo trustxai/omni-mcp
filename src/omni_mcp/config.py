@@ -9,14 +9,71 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class ToolModuleSettings(BaseSettings):
+    """Just the tool-module allowlist, loadable on its own.
+
+    It is a separate model because it is read at a different moment and must
+    survive different failures: `register_all` needs it while the server is
+    still being imported, and a valid allowlist has to be honoured even when
+    some *other* `OMNI_*` variable is malformed.
+
+    Loading the whole of `Settings` there was a bug: one bad `OMNI_MAX_RETRIES`
+    made the settings raise, the caller fell back to "no filter", and a server
+    someone had narrowed to 21 tools came up with all 198 — then reported
+    `## Tool modules (20)` with a straight face. A model that knows about this
+    one variable cannot be taken down by a typo in another (`extra="ignore"`),
+    while a bad module *name* still raises, which is the intended fatal case.
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Comma-separated allowlist of tool modules to register, e.g.
+    # `models,model_git,queries`. Empty — the default — registers every module,
+    # which is what every existing deployment expects. Narrowing it is about
+    # context: every registered tool's schema travels with every request.
+    #
+    # Kept as the raw string, with `tool_modules` doing the parsing, for the
+    # same reason `omni_base_url` keeps its raw value: pydantic-settings would
+    # try to JSON-decode a `tuple[str, ...]` field coming from the environment,
+    # so `OMNI_TOOL_MODULES=models,queries` would fail to load at all.
+    omni_tool_modules: str = ""
+
+    @field_validator("omni_tool_modules")
+    @classmethod
+    def _validate_tool_modules(cls, value: str) -> str:
+        """Reject an allowlist entry that names no module, at load time.
+
+        Validating here rather than at registration is what makes a typo a
+        startup error naming the offender, instead of a server that quietly
+        exposes fewer tools than asked for.
+        """
+        from omni_mcp.tools import parse_tool_modules
+
+        parse_tool_modules(value)
+        return value.strip()
+
+    @property
+    def tool_modules(self) -> tuple[str, ...]:
+        """The parsed allowlist. Empty means "register every module".
+
+        Import is deferred to keep the config layer free of a module-level
+        dependency on the tool package, which imports this module back.
+        """
+        from omni_mcp.tools import parse_tool_modules
+
+        return parse_tool_modules(self.omni_tool_modules)
+
+
+class Settings(ToolModuleSettings):
     """All configuration, derived from `OMNI_*` environment variables.
 
     Every field has a default so importing the package never fails; missing
     credentials surface as a descriptive error on the first API request.
-    """
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    Inherits `omni_tool_modules` / `tool_modules`, so every consumer still sees
+    one settings object — the split only exists so registration can read the
+    allowlist without depending on the rest loading.
+    """
 
     # Instance URL, e.g. `https://acme.omniapp.co` (or the playground host,
     # `https://acme.playground.exploreomni.dev`). A trailing `/api` is accepted
@@ -37,17 +94,6 @@ class Settings(BaseSettings):
     # under the MCP 1 MB tool-result ceiling. (The name says `chars` for
     # backwards compatibility; the budget has always been about payload size.)
     omni_max_result_chars: int = 900_000
-
-    # Comma-separated allowlist of tool modules to register, e.g.
-    # `models,model_git,queries`. Empty — the default — registers every module,
-    # which is what every existing deployment expects. Narrowing it is about
-    # context: every registered tool's schema travels with every request.
-    #
-    # Kept as the raw string, with `tool_modules` doing the parsing, for the
-    # same reason `omni_base_url` keeps its raw value: pydantic-settings would
-    # try to JSON-decode a `tuple[str, ...]` field coming from the environment,
-    # so `OMNI_TOOL_MODULES=models,queries` would fail to load at all.
-    omni_tool_modules: str = ""
 
     @field_validator("omni_base_url")
     @classmethod
@@ -77,31 +123,6 @@ class Settings(BaseSettings):
                 "(tools supply the rest of the path, e.g. /v1/users), got: " + raw
             )
         return raw
-
-    @field_validator("omni_tool_modules")
-    @classmethod
-    def _validate_tool_modules(cls, value: str) -> str:
-        """Reject an allowlist entry that names no module, at load time.
-
-        Validating here rather than at registration is what makes a typo a
-        startup error naming the offender, instead of a server that quietly
-        exposes fewer tools than asked for.
-        """
-        from omni_mcp.tools import parse_tool_modules
-
-        parse_tool_modules(value)
-        return value.strip()
-
-    @property
-    def tool_modules(self) -> tuple[str, ...]:
-        """The parsed allowlist. Empty means "register every module".
-
-        Import is deferred to keep the config layer free of a module-level
-        dependency on the tool package, which imports this module back.
-        """
-        from omni_mcp.tools import parse_tool_modules
-
-        return parse_tool_modules(self.omni_tool_modules)
 
     @property
     def api_root(self) -> str:

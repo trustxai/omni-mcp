@@ -145,23 +145,65 @@ def test_an_unknown_module_fails_at_startup(tmp_path: Path) -> None:
     assert "'models'" not in result.stderr
 
 
-def test_an_unrelated_bad_setting_still_starts_with_every_tool(tmp_path: Path) -> None:
-    """A malformed `OMNI_BASE_URL` must not become a startup crash.
-
-    `omni_get_api_info` exists to explain exactly that misconfiguration, so the
-    server has to come up for it to be callable.
-    """
-    payload = _start_server(tmp_path, OMNI_BASE_URL="acme.omniapp.co")
-
-    assert tuple(payload["modules"]) == available_tool_modules()
-
-
 API_INFO = """
 import asyncio, sys
 from omni_mcp.tools.health import ApiInfoInput, omni_get_api_info
 
 sys.stderr.write(asyncio.run(omni_get_api_info(ApiInfoInput())))
 """
+
+
+#: Variables that make `Settings()` itself raise, one per failing type.
+BAD_SETTINGS = [
+    {"OMNI_BASE_URL": "acme.omniapp.co"},
+    {"OMNI_MAX_RETRIES": "three"},
+    {"OMNI_REQUEST_TIMEOUT_SECONDS": "60s"},
+]
+
+
+@pytest.mark.parametrize("bad", BAD_SETTINGS)
+def test_an_unrelated_bad_setting_still_starts_with_every_tool(tmp_path: Path, bad: dict[str, str]) -> None:
+    """A malformed `OMNI_*` must not become a startup crash.
+
+    `omni_get_api_info` exists to explain exactly that misconfiguration, so the
+    server has to come up for it to be callable.
+    """
+    payload = _start_server(tmp_path, **bad)
+
+    assert tuple(payload["modules"]) == available_tool_modules()
+
+
+@pytest.mark.parametrize("bad", BAD_SETTINGS)
+def test_a_valid_filter_survives_an_unrelated_bad_setting(tmp_path: Path, bad: dict[str, str]) -> None:
+    """The allowlist is honoured even when another variable is malformed.
+
+    It used to be discarded: reading it went through the full `Settings()`,
+    which raises for *any* bad variable, and the fallback meant "no filter". A
+    server narrowed to 21 tools came up with 198 — the exact failure mode this
+    variable exists to prevent, reintroduced by an unrelated typo.
+    """
+    payload = _start_server(tmp_path, OMNI_TOOL_MODULES="queries,models,health", **bad)
+
+    assert sorted(payload["modules"]) == ["health", "models", "queries"]
+    assert len(payload["tools"]) == 21
+    assert "omni_list_users" not in payload["tools"]
+
+
+def test_api_info_admits_the_filter_when_the_configuration_is_invalid(tmp_path: Path) -> None:
+    """The report a user reaches for when nothing works must not lie either.
+
+    With the settings refusing to load, `omni_get_api_info` falls back to the
+    invalid-configuration report — which still has to state which modules are
+    registered, because that is the moment someone is trying to work out what
+    their server is actually running.
+    """
+    result = _run(API_INFO, tmp_path, OMNI_TOOL_MODULES="queries,models,health", OMNI_MAX_RETRIES="three")
+    report = result.stderr
+
+    assert result.returncode == 0, report
+    assert "Invalid configuration" in report
+    assert "Rejected setting(s): `OMNI_MAX_RETRIES`" in report
+    assert f"## Tool modules (3 of {len(available_tool_modules())} registered)" in report
 
 
 def test_api_info_reports_the_registered_set_not_the_package(tmp_path: Path) -> None:
