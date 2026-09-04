@@ -1,5 +1,6 @@
 [project]
-name = "omni-mcp"
+# PyPI rejected the bare `omni-mcp` name as too similar to an existing project.
+name = "omni-app-mcp"
 version = "0.2.0"
 description = "MCP server for the Omni REST API (stdio)."
 readme = "README.md"
@@ -26,7 +27,7 @@ requires-python = ">=3.13"
 dependencies = [
     # Capped below 2.0: the SDK's 2.x line drops `mcp.server.fastmcp` (FastMCP was
     # renamed) and moves `mcp.types` out to a separate package, so an unbounded
-    # spec makes `uvx omni-mcp` resolve to 2.x and die with ModuleNotFoundError
+    # spec makes `uvx omni-app-mcp` resolve to 2.x and die with ModuleNotFoundError
     # on import.
     "mcp>=1.1.0,<2",
     "httpx>=0.27",
@@ -44,6 +45,8 @@ Issues = "https://github.com/trustxai/omni-mcp/issues"
 Changelog = "https://github.com/trustxai/omni-mcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
+omni-app-mcp = "omni_mcp.server:main_stdio"
+# The old script name stays as an alias so existing client configs keep working.
 omni-mcp = "omni_mcp.server:main_stdio"
 
 [build-system]

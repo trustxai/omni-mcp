@@ -1,7 +1,7 @@
-# omni-mcp
+# omni-app-mcp
 
 [![CI](https://github.com/trustxai/omni-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/trustxai/omni-mcp/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/omni-mcp.svg)](https://pypi.org/project/omni-mcp/)
+[![PyPI](https://img.shields.io/pypi/v/omni-app-mcp.svg)](https://pypi.org/project/omni-app-mcp/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 An MCP server that puts the **whole Omni REST API** in front of an LLM client over stdio — users,
@@ -31,14 +31,17 @@ The two are complementary and can be installed side by side — see
 Once published on PyPI:
 
 ```bash
-uvx omni-mcp
+uvx omni-app-mcp
 ```
 
 Until then, run it straight from the repository:
 
 ```bash
-uvx --from git+https://github.com/trustxai/omni-mcp omni-mcp
+uvx --from git+https://github.com/trustxai/omni-mcp omni-app-mcp
 ```
+
+The PyPI distribution and console script are both `omni-app-mcp` (the bare `omni-mcp` name is not
+available on PyPI); the repository keeps its name.
 
 The server speaks **stdio only** and needs two environment variables: your instance URL and an API
 key.
@@ -88,7 +91,7 @@ and `omni_whoami` to see exactly what it can reach.
 claude mcp add omni \
   --env OMNI_BASE_URL=https://your-instance.omniapp.co \
   --env OMNI_API_KEY=your-key \
-  -- uvx omni-mcp
+  -- uvx omni-app-mcp
 ```
 
 ### Claude Desktop
@@ -100,7 +103,7 @@ claude mcp add omni \
   "mcpServers": {
     "omni": {
       "command": "uvx",
-      "args": ["omni-mcp"],
+      "args": ["omni-app-mcp"],
       "env": {
         "OMNI_BASE_URL": "https://your-instance.omniapp.co",
         "OMNI_API_KEY": "your-key"
@@ -119,7 +122,7 @@ claude mcp add omni \
   "mcpServers": {
     "omni": {
       "command": "uvx",
-      "args": ["omni-mcp"],
+      "args": ["omni-app-mcp"],
       "env": {
         "OMNI_BASE_URL": "https://your-instance.omniapp.co",
         "OMNI_API_KEY": "your-key"
@@ -136,7 +139,7 @@ The generic shape — a command, its arguments, and the two environment variable
 ```json
 {
   "command": "uvx",
-  "args": ["--from", "git+https://github.com/trustxai/omni-mcp", "omni-mcp"],
+  "args": ["--from", "git+https://github.com/trustxai/omni-mcp", "omni-app-mcp"],
   "env": {
     "OMNI_BASE_URL": "https://your-instance.omniapp.co",
     "OMNI_API_KEY": "your-key"
@@ -150,12 +153,12 @@ No image is published yet; build one locally. The container talks MCP over stdin
 is required and `-t` must be omitted.
 
 ```bash
-docker build -t omni-mcp .
-docker run -i --rm --env-file .env omni-mcp
+docker build -t omni-app-mcp .
+docker run -i --rm --env-file .env omni-app-mcp
 ```
 
 Copy [`.env.example`](.env.example) to `.env` first. In a client config, the command becomes
-`docker` with `args: ["run", "-i", "--rm", "--env-file", "/absolute/path/to/.env", "omni-mcp"]`.
+`docker` with `args: ["run", "-i", "--rm", "--env-file", "/absolute/path/to/.env", "omni-app-mcp"]`.
 
 ## Tools
 

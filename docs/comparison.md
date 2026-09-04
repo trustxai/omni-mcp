@@ -10,12 +10,12 @@ registry ([TOOLS.md](TOOLS.md)).
 
 ## At a glance
 
-| | Official Omni MCP Server | `omni-mcp` (this project) |
+| | Official Omni MCP Server | `omni-app-mcp` (this project) |
 | --- | --- | --- |
 | Who ships it | Omni | Independent open-source project, not affiliated with Omni |
 | Transport | Remote HTTP (`https://callbacks.omniapp.co/callback/mcp` for OAuth, `https://<instance>/mcp/https` for API keys) | Local **stdio** — the client spawns the process |
 | Authentication | OAuth 2.1 + PKCE (recommended; Omni mints an MCP OAuth PAT for you) or an API key in the `Authorization` header | `OMNI_API_KEY` env var — an Organization API key or a Personal Access Token, sent as `Authorization: Bearer` |
-| Install | Add a URL to the client, or the Omni connector | `uvx omni-mcp`, `uvx --from git+https://github.com/trustxai/omni-mcp omni-mcp`, or a local Docker image |
+| Install | Add a URL to the client, or the Omni connector | `uvx omni-app-mcp`, `uvx --from git+https://github.com/trustxai/omni-mcp omni-app-mcp`, or a local Docker image |
 | Server-side toggles | Organization Admin enables **MCP server**, **Agentic capabilities**, **Omni documentation search**, **Single shot query generation**, **Content access** in AI Hub | None — it is the REST API, so whatever the key can do, the tools can do |
 | Shape of the surface | ~11 purpose-built tools around natural-language analysis | ~200 typed tools, one per REST operation, grouped by API area |
 | Primary use | Ask questions of the data in natural language | Administer, model, validate, publish, schedule and audit the instance |

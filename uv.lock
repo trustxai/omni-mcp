@@ -596,8 +596,8 @@ wheels = [
 ]
 
 [[package]]
-name = "omni-mcp"
-version = "0.1.0"
+name = "omni-app-mcp"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
