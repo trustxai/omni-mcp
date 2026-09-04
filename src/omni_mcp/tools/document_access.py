@@ -307,8 +307,12 @@ class _PrincipalsMutationInput(BaseModel):
         "manage permissions), or `OWNER` (manage permissions and receive access requests; a document must "
         "always keep at least one owner).",
     )
-    access_boost: bool = Field(
-        default=False, description="If `true`, AccessBoost is enabled for the document for these principals."
+    access_boost: bool | None = Field(
+        default=None,
+        description=(
+            "If `true`, AccessBoost is enabled for the document for these principals. Omit to leave the "
+            "current setting alone — it is only sent when set."
+        ),
     )
     user_ids: list[str] = Field(
         default_factory=list,
@@ -329,7 +333,11 @@ class _PrincipalsMutationInput(BaseModel):
 
 
 def _principals_body(params: _PrincipalsMutationInput) -> dict[str, Any]:
-    body: dict[str, Any] = {"role": params.role, "accessBoost": params.access_boost}
+    body: dict[str, Any] = {"role": params.role}
+    # Only sent when the caller said something: a PATCH that always carried
+    # `accessBoost: false` silently turned an enabled boost off.
+    if params.access_boost is not None:
+        body["accessBoost"] = params.access_boost
     if params.user_ids:
         body["userIds"] = params.user_ids
     if params.user_group_ids:
@@ -478,6 +486,13 @@ class UpdateDocumentPermissionSettingsInput(BaseModel):
         default=None, description="Allow uploading data (e.g. CSVs) to create data input tables."
     )
     can_use_dashboard_ai: bool | None = Field(default=None, description="Allow using AI features within the dashboard.")
+
+    @model_validator(mode="after")
+    def _require_a_setting(self) -> Self:
+        if all(getattr(self, name) is None for name, _ in _SETTINGS_FIELD_MAP):
+            raise ValueError("Provide at least one setting to change; an empty PUT would send nothing.")
+        return self
+
     can_use_timezone_override: bool | None = Field(
         default=None, description="Allow users to override the document's timezone setting."
     )
@@ -544,17 +559,17 @@ async def omni_update_document_permission_settings(params: UpdateDocumentPermiss
     try:
         body: dict[str, Any] = {}
         changed: list[str] = []
-        for field_name, api_key in _SETTINGS_FIELD_MAP:
+        for field_name, api_field in _SETTINGS_FIELD_MAP:
             value = getattr(params, field_name)
             if value is not None:
-                body[api_key] = value
-                changed.append(api_key)
+                body[api_field] = value
+                changed.append(api_field)
         payload = await get_client().request_json(
             "PUT", _document_path(params.document_id, "/permissions"), json_body=body
         )
         success = bool(_as_dict(payload).get("success"))
         outcome = "succeeded" if success else "returned without a `success` flag"
-        fields_text = ", ".join(changed) if changed else "no fields (nothing sent)"
+        fields_text = ", ".join(changed)
         return (
             f"Updated permission settings on document `{params.document_id}` — {outcome}. "
             f"Fields changed: {fields_text}."
@@ -958,7 +973,7 @@ async def omni_bulk_update_document_labels(params: BulkUpdateDocumentLabelsInput
         )
         labels = _as_dict(payload).get("labels")
         labels_text = ", ".join(labels) if isinstance(labels, list) and labels else "none reported"
-        return f"Updated labels on document `{params.document_id}`. Current labels: {labels_text}."
+        return truncate_result(f"Updated labels on document `{params.document_id}`. Current labels: {labels_text}.")
     except Exception as exc:
         return handle_api_error(exc)
 

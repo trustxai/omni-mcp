@@ -291,7 +291,8 @@ async def test_grant_document_permissions_with_users(monkeypatch: pytest.MonkeyP
         (
             "POST",
             f"{DOC_PATH}/permissions",
-            {"json_body": {"role": "EDITOR", "accessBoost": False, "userIds": [USER_ID]}},
+            # `accessBoost` is absent, not `false`: an unset boost is left alone.
+            {"json_body": {"role": "EDITOR", "userIds": [USER_ID]}},
         )
     ]
 
@@ -355,7 +356,7 @@ async def test_update_document_permissions(monkeypatch: pytest.MonkeyPatch) -> N
         (
             "PATCH",
             f"{DOC_PATH}/permissions",
-            {"json_body": {"role": "MANAGER", "accessBoost": False, "userIds": [USER_ID]}},
+            {"json_body": {"role": "MANAGER", "userIds": [USER_ID]}},
         )
     ]
 
@@ -408,14 +409,34 @@ async def test_update_document_permission_settings_organization_role(monkeypatch
     assert fake.calls == [("PUT", f"{DOC_PATH}/permissions", {"json_body": {"organizationRole": "VIEWER"}})]
 
 
-async def test_update_document_permission_settings_no_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_document_permission_settings_requires_a_field() -> None:
+    """An empty PUT would send `{}` and change nothing."""
+    with pytest.raises(ValueError, match="at least one setting"):
+        UpdateDocumentPermissionSettingsInput(document_id=DOC_ID)
+
+
+async def test_update_document_permissions_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(exc=_http_error(403, "Requires MANAGER permissions", method="PATCH"))
+    monkeypatch.setattr("omni_mcp.tools.document_access.get_client", lambda: fake)
+
+    result = await omni_update_document_permissions(
+        UpdateDocumentPermissionsInput(document_id=DOC_ID, role="MANAGER", user_ids=[USER_ID])
+    )
+
+    assert result.startswith("Error (403):")
+
+
+async def test_update_document_permissions_can_disable_access_boost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit `false` is still sent — only an omitted value is left out."""
     fake = _FakeClient(payload={"success": True})
     monkeypatch.setattr("omni_mcp.tools.document_access.get_client", lambda: fake)
 
-    result = await omni_update_document_permission_settings(UpdateDocumentPermissionSettingsInput(document_id=DOC_ID))
+    await omni_update_document_permissions(
+        UpdateDocumentPermissionsInput(document_id=DOC_ID, role="VIEWER", user_ids=[USER_ID], access_boost=False)
+    )
 
-    assert "no fields (nothing sent)" in result
-    assert fake.calls == [("PUT", f"{DOC_PATH}/permissions", {"json_body": {}})]
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"]["accessBoost"] is False
 
 
 async def test_update_document_permission_settings_error(monkeypatch: pytest.MonkeyPatch) -> None:
