@@ -146,3 +146,27 @@ def test_catalogue_mode_prints_the_block(capsys: pytest.CaptureFixture[str]) -> 
     assert captured.err == ""
     assert "| Module | Tools | Covers |" in captured.out
     assert "| `health` | 2 | Local diagnostics" in captured.out
+
+
+def test_write_mode_reports_a_missing_marker_instead_of_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--write` gets the marker message that was written for it.
+
+    `extract_block` raises a sentence naming both markers, but `--write` went
+    straight to `replace_block`, whose `str.index` raised a bare
+    `ValueError: substring not found` — so the useful message was only ever
+    seen by its own unit test.
+    """
+    readme = tmp_path / "README.md"
+    readme.write_text("# README\n\nsomeone deleted the markers\n")
+    monkeypatch.setattr(tool_table, "README", readme)
+
+    exit_code = tool_table.main(["--write"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "README.md must contain" in captured.err
+    assert tool_table.CATALOGUE_START in captured.err
+    assert readme.read_text() == "# README\n\nsomeone deleted the markers\n", "README.md must be left untouched"

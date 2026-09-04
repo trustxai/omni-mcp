@@ -205,7 +205,13 @@ def extract_block(text: str) -> str:
 
 
 def replace_block(text: str, body: str) -> str:
-    """`text` with the catalogue block replaced by `body`."""
+    """`text` with the catalogue block replaced by `body`.
+
+    Goes through `extract_block` for the marker check, so a missing marker
+    raises the message written for it instead of a bare `substring not found`
+    from `str.index`.
+    """
+    extract_block(text)
     start = text.index(CATALOGUE_START)
     end = text.index(CATALOGUE_END)
     return text[: start + len(CATALOGUE_START)] + "\n" + body + text[end:]
@@ -238,7 +244,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.write:
         current = README.read_text(encoding="utf-8")
-        updated = replace_block(current, body)
+        try:
+            updated = replace_block(current, body)
+        except ValueError as exc:
+            # Same contract as a broken table: nothing on stdout, the reason on
+            # stderr, README.md left exactly as it was.
+            sys.stderr.write(f"tool_table.py: error: {exc}\n")
+            return 1
         if updated == current:
             sys.stderr.write("tool_table.py: README.md catalogue already up to date\n")
         else:
