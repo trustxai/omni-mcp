@@ -4,6 +4,11 @@ This is the "run a query and get real rows back" area: `POST /v1/query/run`
 returns results as a base64-encoded Apache Arrow table, `GET /v1/query/wait`
 picks up jobs that outlived the request, and `GET /v1/jobs/{jobId}/status`
 reports on asynchronous jobs started elsewhere.
+
+Both query endpoints answer with **newline-delimited JSON** — one object per
+line (`jobs_submitted`, then a line per job's `result`, plus a line carrying
+`remaining_job_ids` when a job outlives the request) — even though the spec
+documents a single object. `_query_body` accepts either shape.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
 import httpx
@@ -277,6 +282,100 @@ def _job_ids(body: dict[str, Any]) -> list[str]:
     return [str(job) for job in jobs] if isinstance(jobs, list) else []
 
 
+def _submitted_job_ids(body: dict[str, Any]) -> list[str]:
+    """Job ids from a `jobs_submitted` map (job id -> client result id)."""
+    submitted = body.get("jobs_submitted")
+    return [str(job_id) for job_id in submitted] if isinstance(submitted, dict) else []
+
+
+def _parse_ndjson(text: str) -> tuple[list[Any], int]:
+    """Parse newline-delimited JSON, returning the values and the reject count.
+
+    Unparseable lines are skipped rather than failing the whole response — one
+    malformed line must not cost the caller a result that did arrive — but they
+    are counted so the tool can say so.
+    """
+    values: list[Any] = []
+    unparsed = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            values.append(json.loads(stripped))
+        except ValueError:
+            unparsed += 1
+    return values, unparsed
+
+
+class _QueryBody(NamedTuple):
+    """One run/wait response, normalised out of however it arrived."""
+
+    body: dict[str, Any]
+    other_result_job_ids: list[str]
+    unparsed_lines: int
+
+
+def _query_body(payload: Any) -> _QueryBody | None:
+    """Normalise a run/wait payload into the single-object shape renderers expect.
+
+    The API answers either with one JSON object or with newline-delimited JSON:
+    a `jobs_submitted` line, a line per job carrying its `result`, and a line
+    carrying `remaining_job_ids` when a job outlives the request. `.json()`
+    cannot parse the latter, so the raw text is re-read line by line here.
+
+    Merging rules: `jobs_submitted` is collected from every line that has it,
+    `remaining_job_ids` is unioned across lines, and `timed_out` is true when any
+    line says so. Result lines are keyed by job id so a later line supersedes an
+    earlier one for the same job; the first job's result becomes the body and the
+    remaining jobs' ids are reported alongside it.
+
+    Returns `None` when the payload is neither an object nor parseable NDJSON, so
+    the caller can hand the raw body back untouched.
+    """
+    if isinstance(payload, dict):
+        return _QueryBody(payload, [], 0)
+    if not isinstance(payload, str):
+        return None
+    values, unparsed = _parse_ndjson(payload)
+    objects = [value for value in values if isinstance(value, dict)]
+    if not objects:
+        return None
+
+    jobs_submitted: dict[str, Any] = {}
+    remaining: list[str] = []
+    results: dict[str, dict[str, Any]] = {}
+    fallback: dict[str, Any] = {}
+    timed_out: bool | None = None
+
+    for index, line in enumerate(objects):
+        submitted = line.get("jobs_submitted")
+        if isinstance(submitted, dict):
+            jobs_submitted.update(submitted)
+        for job_id in _job_ids(line):
+            if job_id not in remaining:
+                remaining.append(job_id)
+        if "timed_out" in line:
+            timed_out = bool(timed_out) or _is_true(line.get("timed_out"))
+        if line.get("result"):
+            # Keyed by job: re-assigning keeps the key's original position, so
+            # the newest line for a job wins while job order stays first-seen.
+            results[str(line.get("job_id") or f"#{index}")] = line
+        elif line.get("job_id") or line.get("status") or line.get("summary"):
+            fallback = line
+
+    ordered = list(results.values())
+    body: dict[str, Any] = dict(ordered[0]) if ordered else dict(fallback)
+    if jobs_submitted:
+        body["jobs_submitted"] = jobs_submitted
+    if remaining:
+        body["remaining_job_ids"] = remaining
+    if timed_out is not None:
+        body["timed_out"] = timed_out
+    others = [str(line.get("job_id")) for line in ordered[1:] if line.get("job_id")]
+    return _QueryBody(body, others, unparsed)
+
+
 def _query_object(params: RunQueryInput) -> dict[str, Any]:
     """Build the `query` object, mapping snake_case inputs to the spec's keys.
 
@@ -329,8 +428,11 @@ def _request_body(params: RunQueryInput) -> dict[str, Any]:
 
 
 def _sql_lines(summary: dict[str, Any]) -> list[str]:
-    """The generated SQL, fenced and cut so it cannot swamp the result."""
-    sql = summary.get("sql")
+    """The generated SQL, fenced and cut so it cannot swamp the result.
+
+    Live responses carry it as `display_sql`; the spec calls it `sql`.
+    """
+    sql = summary.get("sql") or summary.get("display_sql")
     if not isinstance(sql, str) or not sql.strip():
         return []
     text = sql.strip()
@@ -356,7 +458,13 @@ def _field_names(summary: dict[str, Any]) -> list[str]:
     return names
 
 
-def _metadata_lines(body: dict[str, Any], *, workbook_url: str | None = None) -> list[str]:
+def _metadata_lines(
+    body: dict[str, Any],
+    *,
+    workbook_url: str | None = None,
+    other_result_job_ids: list[str] | None = None,
+    unparsed_lines: int = 0,
+) -> list[str]:
     """Job / summary / cache metadata rendered above the result table."""
     summary = _mapping(body.get("summary"))
     lines: list[str] = []
@@ -397,6 +505,11 @@ def _metadata_lines(body: dict[str, Any], *, workbook_url: str | None = None) ->
     if still_running:
         listed = ", ".join(f"`{job_id}`" for job_id in still_running)
         lines.append(f"- Still running: {listed} — poll them with `omni_wait_for_query_results`.")
+    if other_result_job_ids:
+        listed = ", ".join(f"`{job_id}`" for job_id in other_result_job_ids)
+        lines.append(f"- Other job results in this response: {listed} — only the first is rendered below.")
+    if unparsed_lines:
+        lines.append(f"- Note: {unparsed_lines:,} response line(s) could not be parsed as JSON and were skipped.")
     if workbook_url:
         lines.append(f"- Workbook: {workbook_url}")
     return lines
@@ -419,6 +532,8 @@ def _render_query_result(
     *,
     title: str,
     workbook_url: str | None = None,
+    other_result_job_ids: list[str] | None = None,
+    unparsed_lines: int = 0,
 ) -> str:
     """Render a run/wait response: metadata + SQL, then the decoded Arrow rows.
 
@@ -444,6 +559,7 @@ def _render_query_result(
                     "timedOut": _is_true(body.get("timed_out")),
                     "remainingJobIds": _job_ids(body),
                     "workbookUrl": workbook_url,
+                    "otherResultJobIds": other_result_job_ids or [],
                     "rowCount": len(rows),
                     "returnedRows": len(shown),
                     "truncated": len(shown) < len(rows),
@@ -453,7 +569,15 @@ def _render_query_result(
         )
 
     lines = [f"# {title}", ""]
-    lines.extend(_metadata_lines(body, workbook_url=workbook_url) or ["_No job metadata reported._"])
+    lines.extend(
+        _metadata_lines(
+            body,
+            workbook_url=workbook_url,
+            other_result_job_ids=other_result_job_ids,
+            unparsed_lines=unparsed_lines,
+        )
+        or ["_No job metadata reported._"]
+    )
     lines.extend(_sql_lines(summary))
     lines.append("")
     if result_b64:
@@ -482,8 +606,9 @@ async def omni_run_query(params: RunQueryInput) -> str:
     """Run a query against an Omni model and return the resulting rows.
 
     Calls `POST /v1/query/run`. The API answers with a base64-encoded Apache
-    Arrow table, which this tool decodes into rows and renders as a markdown
-    table (or JSON) alongside the generated SQL and execution metadata. Supply
+    Arrow table — as one JSON object or as newline-delimited JSON, both of which
+    this tool decodes into rows and renders as a markdown table (or JSON)
+    alongside the generated SQL and execution metadata. Supply
     the query either field-by-field (`model_id` + `table` + `fields` + …) or as
     a raw `query` object copied from a workbook's Inspector panel — the raw
     object wins whenever it is present.
@@ -550,20 +675,29 @@ async def omni_run_query(params: RunQueryInput) -> str:
             # envelope with the base64 Arrow table. Branch on the request, not on
             # the decoded type: a JSON export parses into a dict or a list.
             return truncate_result(payload if isinstance(payload, str) else to_json(payload))
-        if not isinstance(payload, dict):
+        decoded = _query_body(payload)
+        if decoded is None:
             return truncate_result(str(payload))
 
+        body = decoded.body
         workbook_url = response.headers.get("x-omni-workbook-url")
-        if not payload.get("result"):
-            pending = _job_ids(payload)
-            if pending or _is_true(payload.get("timed_out")):
-                return _pending_message(pending, reason="The request timed out before the query finished.")
+        if not body.get("result"):
+            pending = _job_ids(body)
+            reason = "The request timed out before the query finished."
+            if not pending and not body.get("status") and not body.get("summary"):
+                # Nothing but the submission acknowledgement came back.
+                pending = _submitted_job_ids(body)
+                reason = "The API accepted the query and reported its job ids, but no results yet."
+            if pending or _is_true(body.get("timed_out")):
+                return _pending_message(pending, reason=reason)
         return _render_query_result(
-            payload,
+            body,
             params.response_format,
             params.max_rows,
             title="Query results",
             workbook_url=workbook_url,
+            other_result_job_ids=decoded.other_result_job_ids,
+            unparsed_lines=decoded.unparsed_lines,
         )
     except Exception as exc:
         return handle_api_error(exc)
@@ -583,7 +717,9 @@ async def omni_wait_for_query_results(params: WaitForQueryResultsInput) -> str:
     """Poll query jobs that outlived their request and return their results.
 
     Calls `GET /v1/query/wait` with the job IDs (sent as a JSON array, exactly
-    as the API expects) and keeps polling every `poll_interval_seconds` until
+    as the API expects, and reading back either one JSON object or the
+    newline-delimited JSON the endpoint streams) and keeps polling every
+    `poll_interval_seconds` until
     the response reports `timed_out: false` or `max_wait_seconds` of **wall
     clock** time has passed. Each request is a server-side long poll, so its
     timeout is clamped to whatever is left of that budget — the tool cannot
@@ -624,7 +760,7 @@ async def omni_wait_for_query_results(params: WaitForQueryResultsInput) -> str:
         elapsed = 0.0
         while True:
             remaining = params.max_wait_seconds - elapsed
-            payload = await client.request_json(
+            response = await client.request(
                 "GET",
                 "/v1/query/wait",
                 params={"job_ids": json.dumps(pending)},
@@ -632,9 +768,18 @@ async def omni_wait_for_query_results(params: WaitForQueryResultsInput) -> str:
                 # the whole budget: never let it outlive what is left of it.
                 timeout=min(params.timeout_seconds, remaining) if remaining > 0 else params.timeout_seconds,
             )
-            body = payload if isinstance(payload, dict) else {}
+            # This endpoint streams the same newline-delimited JSON as the run one.
+            decoded = _query_body(_decode_response(response)) or _QueryBody({}, [], 0)
+            body = decoded.body
             if not _is_true(body.get("timed_out")):
-                return _render_query_result(body, params.response_format, params.max_rows, title="Query results")
+                return _render_query_result(
+                    body,
+                    params.response_format,
+                    params.max_rows,
+                    title="Query results",
+                    other_result_job_ids=decoded.other_result_job_ids,
+                    unparsed_lines=decoded.unparsed_lines,
+                )
             pending = _job_ids(body) or pending
             elapsed = _monotonic() - start
             if elapsed + params.poll_interval_seconds >= params.max_wait_seconds:

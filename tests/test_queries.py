@@ -82,7 +82,7 @@ class _FakeClient:
 
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         payload = self._record(method, path, kwargs)
-        request = httpx.Request(method, f"https://acme.omniapp.co/api{path.lstrip('/')}")
+        request = httpx.Request(method, f"https://acme.omniapp.co/api{path}")
         if isinstance(payload, str):
             return httpx.Response(200, text=payload, headers=self._headers, request=request)
         return httpx.Response(200, json=payload, headers=self._headers, request=request)
@@ -119,6 +119,37 @@ def _stream_b64(table: pa.Table) -> str:
 
 
 ARROW_B64 = _stream_b64(_sample_table())
+ARROW_B64_ALT = _stream_b64(
+    pa.table({"id": pa.array([3], type=pa.int64()), "name": pa.array(["gamma"], type=pa.string())})
+)
+
+
+def _ndjson(*objects: Any) -> str:
+    """The newline-delimited JSON both query endpoints actually stream."""
+    return "\n".join(json.dumps(obj) for obj in objects) + "\n"
+
+
+def _submitted_line(job_id: str = "job-1", client_result_id: str = "client-1") -> dict[str, Any]:
+    """The first line of a live run response."""
+    return {"jobs_submitted": {job_id: client_result_id}}
+
+
+def _result_line(job_id: str = "job-1", result: str = ARROW_B64, **overrides: Any) -> dict[str, Any]:
+    """A result line, shaped like the live one (note `display_sql`, not `sql`)."""
+    line: dict[str, Any] = {
+        "job_id": job_id,
+        "status": "COMPLETE",
+        "client_result_id": "client-1",
+        "summary": {
+            "cache_type": "MISS",
+            "display_sql": "SELECT * FROM order_items LIMIT 10",
+            "total_rows": 2,
+        },
+        "stream_stats": {"server_stream": 12},
+        "result": result,
+    }
+    line.update(overrides)
+    return line
 
 
 def _result_payload(**overrides: Any) -> dict[str, Any]:
@@ -495,6 +526,112 @@ async def test_run_query_403_for_pat_impersonation(monkeypatch: pytest.MonkeyPat
     assert "Personal Access Token" in result
 
 
+async def test_run_query_decodes_ndjson_two_line_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live API answers with newline-delimited JSON, not one object."""
+    fake = _FakeClient(payload=_ndjson(_submitted_line(), _result_line()))
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
+
+    result = await omni_run_query(_fields_input())
+
+    assert "- Job ID: `job-1`" in result
+    assert "- Status: `COMPLETE`" in result
+    assert "- Rows reported by the API: 2" in result
+    assert "SELECT * FROM order_items LIMIT 10" in result
+    assert "**2** row(s) returned." in result
+    assert "| 1 | alpha |" in result
+    assert "| 2 | beta |" in result
+
+
+async def test_run_query_ndjson_json_envelope_keeps_the_live_smoke_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "omni_mcp.tools.queries.get_client",
+        lambda: _FakeClient(payload=_ndjson(_submitted_line(), _result_line())),
+    )
+
+    payload = json.loads(await omni_run_query(_fields_input(response_format=ResponseFormat.JSON)))
+
+    assert payload["jobId"] == "job-1"
+    assert payload["rowCount"] == 2
+    assert payload["truncated"] is False
+    assert payload["rows"] == [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+
+
+async def test_run_query_ndjson_multi_job_reports_the_other_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _ndjson(
+        {"jobs_submitted": {"job-1": "client-1", "job-2": "client-2"}},
+        _result_line(),
+        _result_line(job_id="job-2", result=ARROW_B64_ALT),
+    )
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=body))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "| 1 | alpha |" in result
+    assert "- Other job results in this response: `job-2`" in result
+    assert "gamma" not in result
+
+
+async def test_run_query_ndjson_last_line_for_a_job_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later line supersedes an earlier one for the same job."""
+    body = _ndjson(_submitted_line(), _result_line(), _result_line(result=ARROW_B64_ALT))
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=body))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "| 3 | gamma |" in result
+    assert "alpha" not in result
+    assert "Other job results" not in result
+
+
+async def test_run_query_ndjson_jobs_submitted_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _ndjson({"jobs_submitted": {JOB_A: "client-1"}}, {"unrelated": True})
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=body))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "# Query still running" in result
+    assert JOB_A in result
+    assert "omni_wait_for_query_results" in result
+
+
+async def test_run_query_ndjson_timeout_line_returns_remaining_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _ndjson({"jobs_submitted": {JOB_A: "client-1"}}, {"timed_out": True, "remaining_job_ids": [JOB_A]})
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=body))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "# Query still running" in result
+    assert JOB_A in result
+
+
+async def test_run_query_ndjson_result_plus_remaining_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _ndjson(_submitted_line(), _result_line(), {"timed_out": True, "remaining_job_ids": [JOB_B]})
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=body))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "| 1 | alpha |" in result
+    assert f"- Still running: `{JOB_B}`" in result
+
+
+async def test_run_query_ndjson_skips_unparseable_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _ndjson(_submitted_line(), _result_line()) + "this line is not json\n"
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=body))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "| 1 | alpha |" in result
+    assert "1 response line(s) could not be parsed" in result
+
+
+async def test_run_query_non_json_body_falls_back_to_raw_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload="<html>nope</html>"))
+
+    result = await omni_run_query(_fields_input())
+
+    assert result == "<html>nope</html>"
+
+
 # --- omni_wait_for_query_results --------------------------------------
 
 
@@ -620,6 +757,37 @@ async def test_wait_403_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
     result = await omni_wait_for_query_results(WaitForQueryResultsInput(job_ids=[JOB_A]))
 
     assert result.startswith("Error (403):")
+
+
+async def test_wait_decodes_ndjson(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/v1/query/wait` streams the same newline-delimited JSON."""
+    fake = _FakeClient(payload=_ndjson(_submitted_line(), _result_line()))
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
+    _patch_polling(monkeypatch, _Clock())
+
+    result = await omni_wait_for_query_results(WaitForQueryResultsInput(job_ids=[JOB_A]))
+
+    assert len(fake.calls) == 1
+    assert "**2** row(s) returned." in result
+    assert "| 1 | alpha |" in result
+
+
+async def test_wait_polls_while_ndjson_reports_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(
+        payloads=[
+            _ndjson({"jobs_submitted": {JOB_A: "client-1"}}, {"timed_out": True, "remaining_job_ids": [JOB_A]}),
+            _ndjson(_submitted_line(), _result_line()),
+        ]
+    )
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
+    slept = _patch_polling(monkeypatch, _Clock())
+
+    result = await omni_wait_for_query_results(WaitForQueryResultsInput(job_ids=[JOB_A]))
+
+    assert slept == [2.0]
+    assert len(fake.calls) == 2
+    assert fake.calls[1][2]["params"] == {"job_ids": json.dumps([JOB_A])}
+    assert "| 1 | alpha |" in result
 
 
 # --- omni_get_job_status ----------------------------------------------
