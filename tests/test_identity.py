@@ -16,13 +16,13 @@ from omni_mcp.tools.identity import (
     GetApiTokenInput,
     ListApiTokensInput,
     ListUserAttributesInput,
-    SetApiTokenEnabledInput,
+    UpdateApiTokenInput,
     WhoamiInput,
     omni_delete_api_token,
     omni_get_api_token,
     omni_list_api_tokens,
     omni_list_user_attributes,
-    omni_set_api_token_enabled,
+    omni_update_api_token,
     omni_whoami,
 )
 
@@ -301,18 +301,16 @@ def test_get_api_token_rejects_empty_id() -> None:
 
 
 # --------------------------------------------------------------------------
-# omni_set_api_token_enabled
+# omni_update_api_token
 # --------------------------------------------------------------------------
 
 
-async def test_set_api_token_enabled_disable(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_update_api_token_disable(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     disabled_record = dict(TOKEN_RECORD, enabled=False)
     fake = _FakeClient(payload=disabled_record)
     monkeypatch.setattr("omni_mcp.tools.identity.get_client", lambda: fake)
 
-    result = await omni_set_api_token_enabled(
-        SetApiTokenEnabledInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=False)
-    )
+    result = await omni_update_api_token(UpdateApiTokenInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=False))
 
     assert "disabled" in result
     assert "CI deployment key" in result
@@ -325,13 +323,11 @@ async def test_set_api_token_enabled_disable(monkeypatch: pytest.MonkeyPatch, co
     ]
 
 
-async def test_set_api_token_enabled_enable(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_update_api_token_enable(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     fake = _FakeClient(payload=TOKEN_RECORD)
     monkeypatch.setattr("omni_mcp.tools.identity.get_client", lambda: fake)
 
-    result = await omni_set_api_token_enabled(
-        SetApiTokenEnabledInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=True)
-    )
+    result = await omni_update_api_token(UpdateApiTokenInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=True))
 
     assert "enabled" in result
     assert fake.calls == [
@@ -343,25 +339,32 @@ async def test_set_api_token_enabled_enable(monkeypatch: pytest.MonkeyPatch, con
     ]
 
 
-async def test_set_api_token_enabled_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+async def test_update_api_token_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     error = _http_error(404, "Api key with id <id> does not exist")
     monkeypatch.setattr("omni_mcp.tools.identity.get_client", lambda: _FakeClient(exc=error))
 
-    result = await omni_set_api_token_enabled(
-        SetApiTokenEnabledInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=True)
-    )
+    result = await omni_update_api_token(UpdateApiTokenInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=True))
 
     assert result.startswith("Error (404):")
 
 
-def test_set_api_token_enabled_requires_enabled_field() -> None:
+def test_update_api_token_requires_enabled_field() -> None:
     with pytest.raises(ValidationError):
-        SetApiTokenEnabledInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890")  # type: ignore[call-arg]
+        UpdateApiTokenInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890")  # type: ignore[call-arg]
 
 
-def test_set_api_token_enabled_rejects_unknown_fields() -> None:
+def test_update_api_token_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        SetApiTokenEnabledInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=True, extra="x")  # type: ignore[call-arg]
+        UpdateApiTokenInput(id="a1b2c3d4-e5f6-7890-abcd-ef1234567890", enabled=True, extra="x")  # type: ignore[call-arg]
+
+
+async def test_update_api_token_quotes_id(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+    fake = _FakeClient(payload=TOKEN_RECORD)
+    monkeypatch.setattr("omni_mcp.tools.identity.get_client", lambda: fake)
+
+    await omni_update_api_token(UpdateApiTokenInput(id="weird/id value", enabled=True))
+
+    assert fake.calls == [("PUT", "/v1/api-keys/weird%2Fid%20value", {"json_body": {"enabled": True}})]
 
 
 # --------------------------------------------------------------------------
@@ -378,6 +381,15 @@ async def test_delete_api_token(monkeypatch: pytest.MonkeyPatch, configured: Non
     assert "API token revoked" in result
     assert "a1b2c3d4-e5f6-7890-abcd-ef1234567890" in result
     assert fake.calls == [("DELETE", "/v1/api-keys/a1b2c3d4-e5f6-7890-abcd-ef1234567890", {})]
+
+
+async def test_delete_api_token_quotes_id(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
+    fake = _FakeClient(payload={"message": "API token revoked", "success": True})
+    monkeypatch.setattr("omni_mcp.tools.identity.get_client", lambda: fake)
+
+    await omni_delete_api_token(DeleteApiTokenInput(id="weird/id value"))
+
+    assert fake.calls == [("DELETE", "/v1/api-keys/weird%2Fid%20value", {})]
 
 
 async def test_delete_api_token_error_path(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
@@ -407,6 +419,7 @@ async def test_list_user_attributes_markdown(monkeypatch: pytest.MonkeyPatch, co
 
     assert "omni_user_id" in result
     assert "region" in result
+    assert "User region for RLS" in result
     assert "does not paginate" in result
     assert fake.calls == [("GET", "/v1/user-attributes", {})]
 

@@ -126,8 +126,10 @@ async def omni_whoami(params: WhoamiInput) -> str:
         if params.response_format is ResponseFormat.JSON:
             return truncate_result(to_json(body))
 
-        user: dict[str, Any] = body.get("user") or {}
-        roles: dict[str, Any] = body.get("rolesByModel") or {}
+        raw_user = body.get("user")
+        user: dict[str, Any] = raw_user if isinstance(raw_user, dict) else {}
+        raw_roles = body.get("rolesByModel")
+        roles: dict[str, Any] = raw_roles if isinstance(raw_roles, dict) else {}
         lines = [
             "# Who Am I",
             "",
@@ -326,12 +328,12 @@ async def omni_get_api_token(params: GetApiTokenInput) -> str:
 
 
 # --------------------------------------------------------------------------
-# omni_set_api_token_enabled
+# omni_update_api_token
 # --------------------------------------------------------------------------
 
 
-class SetApiTokenEnabledInput(BaseModel):
-    """Input for `omni_set_api_token_enabled`."""
+class UpdateApiTokenInput(BaseModel):
+    """Input for `omni_update_api_token`."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -340,16 +342,16 @@ class SetApiTokenEnabledInput(BaseModel):
 
 
 @mcp.tool(
-    name="omni_set_api_token_enabled",
+    name="omni_update_api_token",
     annotations=ToolAnnotations(
-        title="Enable or Disable API Token",
+        title="Update API Token",
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
     ),
 )
-async def omni_set_api_token_enabled(params: SetApiTokenEnabledInput) -> str:
+async def omni_update_api_token(params: UpdateApiTokenInput) -> str:
     """Enable or disable an API token without permanently deleting it.
 
     Calls `PUT /v1/api-keys/{id}` with `{"enabled": <bool>}`. This is idempotent — calling it
@@ -387,7 +389,7 @@ async def omni_set_api_token_enabled(params: SetApiTokenEnabledInput) -> str:
         name = body.get("name", "unnamed")
         token_id = body.get("id", params.id)
         state = "enabled" if body.get("enabled") else "disabled"
-        return f"API token **{name}** (`{token_id}`) is now **{state}**."
+        return truncate_result(f"API token **{name}** (`{token_id}`) is now **{state}**.")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -449,7 +451,7 @@ async def omni_delete_api_token(params: DeleteApiTokenInput) -> str:
         payload = await get_client().request_json("DELETE", path)
         body: dict[str, Any] = payload if isinstance(payload, dict) else {}
         message = body.get("message", "API token revoked")
-        return f"{message} (id `{params.id}`)."
+        return truncate_result(f"{message} (id `{params.id}`).")
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -469,13 +471,14 @@ class ListUserAttributesInput(BaseModel):
     )
 
 
-def _format_attribute_row(item: dict[str, Any]) -> dict[str, Any]:
+def _format_attribute_row(item: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "name": item.get("name", "unnamed"),
         "label": item.get("label", ""),
         "type": item.get("type", "unknown"),
         "multiple_values": item.get("multiple_values", False),
         "default_value": item.get("default_value"),
+        "description": item.get("description") or "",
         "system": item.get("system", False),
         "id": item.get("id") or "",
     }
@@ -512,8 +515,9 @@ async def omni_list_user_attributes(params: ListUserAttributesInput) -> str:
 
     Returns:
     A markdown table of all attribute definitions (name, label, type, multiple_values,
-    default_value, system, id), or the raw `records` payload when `response_format` is `json`.
-    This endpoint has no pagination — the response always contains the full list.
+    default_value, description, system, id), or the raw `records` payload when
+    `response_format` is `json`. This endpoint has no pagination — the response always
+    contains the full list.
 
     Examples:
     - `{"params": {}}`
@@ -526,7 +530,8 @@ async def omni_list_user_attributes(params: ListUserAttributesInput) -> str:
     try:
         payload = await get_client().request_json("GET", "/v1/user-attributes")
         body: dict[str, Any] = payload if isinstance(payload, dict) else {}
-        records: list[dict[str, Any]] = body.get("records") or []
+        raw_records = body.get("records")
+        records: list[Any] = raw_records if isinstance(raw_records, list) else []
 
         if params.response_format is ResponseFormat.JSON:
             return truncate_result(to_json({"count": len(records), "records": records}))
