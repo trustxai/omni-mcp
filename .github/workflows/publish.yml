@@ -1,25 +1,33 @@
-name: Publish to PyPI
+name: Publish to PyPI (manual)
 
+# Manual fallback only: the normal path is the `publish` job in
+# release-please.yml, which runs automatically when a release is created.
 on:
-  release:
-    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to build and publish (e.g. v0.1.0)"
+        required: true
+        type: string
 
 permissions: {}
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Publishes with PyPI trusted publishing (OIDC) — no API token secret.
+    environment: pypi
     permissions:
       id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version-file: ".python-version"
       - uses: astral-sh/setup-uv@v5
       - run: uv build
+      # Trusted publishing (OIDC) — no API token secret.
       - run: uv publish

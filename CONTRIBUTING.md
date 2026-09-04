@@ -22,14 +22,15 @@ src/omni_mcp/
   errors.py          handle_api_error(exc) -> str
   formatters.py      ResponseFormat, to_json, truncate_result, pagination, Arrow decoding
   server.py          the FastMCP instance; imports register_all at import time
-  tools/__init__.py  register_all(): imports every tool module
+  tools/__init__.py  register_all(): imports every tool module (no arguments)
   tools/<area>.py    one module per API area — where your tools go
 tests/test_<area>.py one test file per tool module
 scripts/tool_table.py generates the README tool table
 ```
 
 `tools/__init__.py` already lists **every** module, so two people can implement different areas at
-the same time without touching a shared file. Do not add tools to an area that is not yours, and do
+the same time without touching a shared file. `register_all()` takes no argument: every module
+decorates against the single server instance it imports from `omni_mcp.server`. Do not add tools to an area that is not yours, and do
 not edit another area's module.
 
 ## The tool contract
@@ -59,8 +60,9 @@ not edit another area's module.
    `Created folder **Marketing** (id `abc123`).` — not a dump of the response body.
 9. **List tools expose `page_size` and `cursor`** and render through `cursor_paginated_response`,
    which prints the next cursor so the caller can page. Never loop over pages inside a tool.
-10. **Stay under the 1 MB tool-result limit**: every result goes through `truncate_result`
-    (`cursor_paginated_response` and `format_arrow_result` already do it for you).
+10. **Stay under the 1 MB tool-result limit**: every result goes through `truncate_result`, which
+    budgets in UTF-8 **bytes** (`cursor_paginated_response` and `format_arrow_result` already do it
+    for you).
 11. **Never print to stdout** — stdout is the MCP channel. Use `logging` to stderr if you must.
 12. **Never echo secrets.** Report whether a key is configured, never the key itself.
 
@@ -206,7 +208,8 @@ uv run python -c "from omni_mcp.server import mcp; print('import ok')"
 uv run python scripts/tool_table.py
 ```
 
-CI runs the same four checks on every pull request. `mypy` is strict: annotate everything.
+CI runs the same checks on every pull request — lint, format, typecheck, the non-live tests and
+the import smoke check. `mypy` is strict: annotate everything.
 
 ## Commits and releases
 
@@ -214,10 +217,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/): `fe
 `docs:`, `test:`, `chore:`, `ci:`, `refactor:`. The type drives the version bump, so use `feat:` for
 new tools and `fix:` for behaviour fixes.
 
-[release-please](https://github.com/googleapis/release-please) watches `main`, keeps a release pull
-request open with the generated `CHANGELOG.md` and the bumped version in `pyproject.toml`, and
-publishing that release triggers the PyPI workflow (trusted publishing, no tokens). Do not bump the
-version or edit `CHANGELOG.md` by hand.
+[release-please](https://github.com/googleapis/release-please) watches `main` and keeps a release
+pull request open with the generated `CHANGELOG.md` and the bumped version in `pyproject.toml`.
+Merging it creates the GitHub release, and the `publish` job **inside the same workflow** builds and
+uploads to PyPI with trusted publishing (no tokens). That job lives there deliberately: GitHub does
+not trigger `on: release` workflows from a release created with `GITHUB_TOKEN`.
+`.github/workflows/publish.yml` is a manual `workflow_dispatch` fallback that takes a tag. Do not
+bump the version or edit `CHANGELOG.md` by hand.
 
 ## README tool table
 
