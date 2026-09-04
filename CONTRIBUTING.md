@@ -291,16 +291,20 @@ bump the version or edit `CHANGELOG.md` by hand.
 
 PyPI matches a trusted publisher on the **workflow filename plus the environment**, not on the
 repository alone — so both workflows that can upload need their own entry. On pypi.org, under the
-`omni-mcp` project → *Manage* → *Publishing*, register these two GitHub publishers:
+`omni-app-mcp` project → *Manage* → *Publishing*, register these two GitHub publishers:
 
 | Owner | Repository | Workflow file | Environment |
 | --- | --- | --- | --- |
-| `trustxai` | `omni-mcp` | `release-please.yml` | `pypi` |
-| `trustxai` | `omni-mcp` | `publish.yml` | `pypi` |
+| `trustxai` | [`omni-mcp`](https://github.com/trustxai/omni-mcp) | `release-please.yml` | Any *(registered)* |
+| `trustxai` | [`omni-mcp`](https://github.com/trustxai/omni-mcp) | `publish.yml` | `pypi` |
 
-With only the first entry the normal release path works and the manual fallback fails at
-`uv publish` with an OIDC/"not a trusted publisher" error — at exactly the moment it is needed.
-Before the first release, add both as *pending* publishers (the project does not exist on PyPI yet).
+The publisher registered today is the first row: workflow `release-please.yml` with the environment
+left as **Any**, which the release job's own `environment: pypi` satisfies. Registering the second
+one for `publish.yml` is what enables the manual re-run path — with only the first entry the normal
+release path works and the manual fallback fails at `uv publish` with an OIDC/"not a trusted
+publisher" error, at exactly the moment it is needed.
+Add publishers that do not exist yet as *pending* ones (the project is not on PyPI until the first
+successful upload).
 
 ## The tool reference
 

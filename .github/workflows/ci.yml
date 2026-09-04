@@ -61,4 +61,4 @@ jobs:
       - uses: actions/checkout@v4
       # Build only, never push: surfaces a broken Dockerfile or a pinned uv
       # image tag that no longer resolves, which no other job would catch.
-      - run: docker build -t omni-mcp:ci .
+      - run: docker build -t omni-app-mcp:ci .
