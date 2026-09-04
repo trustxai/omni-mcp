@@ -19,8 +19,8 @@ jobs:
           python-version-file: ".python-version"
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen --group dev
-      - run: uv run ruff check src/ tests/
-      - run: uv run ruff format --check src/ tests/
+      - run: uv run ruff check src/ tests/ scripts/
+      - run: uv run ruff format --check src/ tests/ scripts/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -54,3 +54,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
       - run: uv run python -c "from omni_mcp.server import mcp; print('import ok')"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build only, never push: surfaces a broken Dockerfile or a pinned uv
+      # image tag that no longer resolves, which no other job would catch.
+      - run: docker build -t omni-mcp:ci .
