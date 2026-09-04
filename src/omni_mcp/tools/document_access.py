@@ -486,13 +486,6 @@ class UpdateDocumentPermissionSettingsInput(BaseModel):
         default=None, description="Allow uploading data (e.g. CSVs) to create data input tables."
     )
     can_use_dashboard_ai: bool | None = Field(default=None, description="Allow using AI features within the dashboard.")
-
-    @model_validator(mode="after")
-    def _require_a_setting(self) -> Self:
-        if all(getattr(self, name) is None for name, _ in _SETTINGS_FIELD_MAP):
-            raise ValueError("Provide at least one setting to change; an empty PUT would send nothing.")
-        return self
-
     can_use_timezone_override: bool | None = Field(
         default=None, description="Allow users to override the document's timezone setting."
     )
@@ -502,6 +495,12 @@ class UpdateDocumentPermissionSettingsInput(BaseModel):
     require_pull_request_to_publish: bool | None = Field(
         default=None, description="Require a pull request through the git integration to publish changes."
     )
+
+    @model_validator(mode="after")
+    def _require_a_setting(self) -> Self:
+        if all(getattr(self, name) is None for name, _ in _SETTINGS_FIELD_MAP):
+            raise ValueError("Provide at least one setting to change; an empty PUT would send nothing.")
+        return self
 
 
 _SETTINGS_FIELD_MAP: tuple[tuple[str, str], ...] = (
