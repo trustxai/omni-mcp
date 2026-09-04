@@ -26,7 +26,7 @@ The server speaks **stdio only** and needs two environment variables: your insta
 | `OMNI_API_KEY` | yes | — | Organization API key or Personal Access Token, sent as `Authorization: Bearer`. |
 | `OMNI_REQUEST_TIMEOUT_SECONDS` | no | `60` | Per-request timeout in seconds. |
 | `OMNI_MAX_RETRIES` | no | `3` | Extra attempts on `429` (honouring `Retry-After`) and `502/503/504`. |
-| `OMNI_MAX_RESULT_CHARS` | no | `900000` | Tool results are truncated below this, keeping them under the MCP 1 MB limit. |
+| `OMNI_MAX_RESULT_CHARS` | no | `900000` | Result-size budget in **UTF-8 bytes**; longer results are truncated with a visible marker, keeping them under the MCP 1 MB limit. |
 
 Create an Organization API key in **Settings → API keys**, or use a Personal Access Token. A PAT acts as a single user: endpoints that require an Organization API key (SCIM, `userId` impersonation) answer `403`. The API is rate limited to **60 requests/minute per key**.
 

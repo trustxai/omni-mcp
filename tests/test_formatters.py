@@ -257,3 +257,66 @@ def test_format_arrow_result_empty_table() -> None:
     empty = pa.table({"id": pa.array([], type=pa.int64())})
 
     assert format_arrow_result(_stream_b64(empty), ResponseFormat.MARKDOWN) == "_Query returned no rows._"
+
+
+# --- strict JSON / non-finite numbers ---------------------------------
+
+
+def test_to_json_maps_non_finite_floats_to_null() -> None:
+    text = to_json({"a": float("nan"), "b": float("inf"), "c": float("-inf"), "d": 1.5})
+    payload = json.loads(text)
+
+    assert "NaN" not in text
+    assert "Infinity" not in text
+    assert payload == {"a": None, "b": None, "c": None, "d": 1.5}
+
+
+def test_to_json_handles_non_finite_inside_nested_structures() -> None:
+    payload = json.loads(to_json({"rows": [{"v": float("nan")}], "t": (float("inf"), 2)}))
+
+    assert payload == {"rows": [{"v": None}], "t": [None, 2]}
+
+
+def test_decode_arrow_base64_maps_non_finite_floats_to_null() -> None:
+    table = pa.table({"value": pa.array([1.5, float("nan"), float("inf"), float("-inf")], type=pa.float64())})
+
+    rows = decode_arrow_base64(_stream_b64(table))
+
+    assert [row["value"] for row in rows] == [1.5, None, None, None]
+    assert json.loads(json.dumps(rows)) == rows
+
+
+def test_format_arrow_result_json_is_strict_json_for_non_finite() -> None:
+    table = pa.table({"value": pa.array([float("nan")], type=pa.float64())})
+
+    text = format_arrow_result(_stream_b64(table), ResponseFormat.JSON)
+
+    assert "NaN" not in text
+    assert json.loads(text)["rows"] == [{"value": None}]
+
+
+# --- byte-based truncation --------------------------------------------
+
+
+def test_truncate_result_counts_utf8_bytes_not_characters() -> None:
+    # 100 three-byte characters = 300 bytes, well over a 120-byte budget.
+    text = "\u3042" * 100
+
+    result = truncate_result(text, limit=120)
+
+    assert len(result.encode("utf-8")) <= 120
+    assert "[truncated" in result
+    assert "bytes" in result
+
+
+def test_truncate_result_keeps_multibyte_text_that_fits() -> None:
+    text = "\u00e9\u00e9\u00e9"
+
+    assert truncate_result(text, limit=10) == text
+
+
+def test_truncate_result_never_splits_a_code_point() -> None:
+    result = truncate_result("\U0001f600" * 50, limit=100)
+
+    # Decodes cleanly: the byte cut dropped any partial code point.
+    assert result.encode("utf-8").decode("utf-8") == result

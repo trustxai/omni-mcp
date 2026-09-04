@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -14,7 +15,7 @@ from typing import Any
 
 from omni_mcp.config import get_settings
 
-TRUNCATION_NOTE = "[truncated: result exceeded {limit:,} characters — narrow the request or page through it]"
+TRUNCATION_NOTE = "[truncated: result exceeded {limit:,} bytes — narrow the request or page through it]"
 
 
 class ResponseFormat(StrEnum):
@@ -25,22 +26,33 @@ class ResponseFormat(StrEnum):
 
 
 def to_json(data: Any) -> str:
-    """Serialize any payload for the LLM (stable, human-readable)."""
-    return json.dumps(data, indent=2, default=str, ensure_ascii=False)
+    """Serialize any payload for the LLM (stable, human-readable, strict JSON).
+
+    Input is normalised through `_json_safe` first and `allow_nan=False` is set,
+    so a `NaN`/`Infinity` can never reach the output: bare `NaN` is invalid JSON
+    and breaks non-Python clients that parse tool results.
+    """
+    return json.dumps(_json_safe(data), indent=2, default=str, ensure_ascii=False, allow_nan=False)
 
 
 def truncate_result(text: str, limit: int | None = None) -> str:
-    """Cut `text` to `limit` characters, appending a visible truncation marker.
+    """Cut `text` to `limit` UTF-8 bytes, appending a visible truncation marker.
 
-    The default limit comes from `OMNI_MAX_RESULT_CHARS`, keeping tool results
-    below the MCP 1 MB ceiling.
+    The budget is measured in bytes, not characters, because the MCP
+    tool-result ceiling is a payload size — a character limit would let
+    multi-byte text (accents, CJK, emoji) blow through it. The default comes
+    from `OMNI_MAX_RESULT_CHARS`.
     """
     effective = limit if limit is not None else get_settings().omni_max_result_chars
-    if effective <= 0 or len(text) <= effective:
+    if effective <= 0:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= effective:
         return text
     note = "\n\n" + TRUNCATION_NOTE.format(limit=effective)
-    keep = max(0, effective - len(note))
-    return text[:keep] + note
+    keep = max(0, effective - len(note.encode("utf-8")))
+    # `errors="ignore"` drops a code point split by the byte cut.
+    return encoded[:keep].decode("utf-8", errors="ignore") + note
 
 
 def iso_or_na(value: Any) -> str:
@@ -56,7 +68,7 @@ def iso_or_na(value: Any) -> str:
 
 
 def _cell(value: Any) -> str:
-    """Render one table cell: single-line, pipe-escaped, never empty."""
+    """Render one table cell: collapsed to a single line, with `|` escaped."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -156,18 +168,26 @@ def cursor_paginated_response(
 
 
 def _json_safe(value: Any) -> Any:
-    """Convert an Arrow-decoded Python value into something JSON-serialisable."""
-    if value is None or isinstance(value, bool | int | float | str):
+    """Convert a Python value into something strict JSON can represent.
+
+    Non-finite floats (`nan`, `inf`, `-inf`) become `None`: JSON has no literal
+    for them, and emitting bare `NaN` produces output that most clients refuse
+    to parse.
+    """
+    if value is None or isinstance(value, bool | int | str):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, datetime | date | time):
         return value.isoformat()
     if isinstance(value, timedelta):
         return value.total_seconds()
     if isinstance(value, Decimal):
         try:
-            return float(value)
+            number = float(value)
         except (OverflowError, ValueError):
             return str(value)
+        return number if math.isfinite(number) else None
     if isinstance(value, bytes | bytearray | memoryview):
         return base64.b64encode(bytes(value)).decode("ascii")
     if isinstance(value, Mapping):
