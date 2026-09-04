@@ -999,3 +999,15 @@ def test_inputs_reject_unknown_fields() -> None:
     ):
         with pytest.raises(ValueError):
             model(unexpected="x")  # type: ignore[call-arg]
+
+
+async def test_get_model_yaml_bytes_column_counts_utf8_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-ASCII model file was under-reported when the column counted characters."""
+    content = "name: ünïcode"  # 13 characters, 15 UTF-8 bytes
+    fake = _FakeClient(payload={"files": {"views/customers.yaml": content}, "checksums": {}})
+    monkeypatch.setattr("omni_mcp.tools.models.get_client", lambda: fake)
+
+    result = await omni_get_model_yaml(GetModelYamlInput(model_id=MODEL_ID))
+
+    assert f"| {len(content.encode('utf-8'))} |" in result
+    assert f"| {len(content)} |" not in result
