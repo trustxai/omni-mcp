@@ -95,7 +95,7 @@ _WRITE_FIELD_MAP: tuple[tuple[str, str], ...] = (
     ("filename", "filename"),
 )
 
-#: Core body fields the create endpoint requires when no raw `schedule` is given.
+#: Core body fields the create endpoint requires when no raw `body` is given.
 _CREATE_REQUIRED_FIELDS: tuple[str, ...] = (
     "identifier",
     "name",
@@ -328,15 +328,30 @@ class _ScheduleWriteFields(BaseModel):
             "`{{yesterdayDate}}`, `{{timeZone}}`, `{{entityName}}`, `{{format}}`, `{{scheduledTaskName}}`."
         ),
     )
-    schedule: dict[str, Any] | None = Field(
+    body: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Escape hatch: the raw request body, sent verbatim and **overriding every field above** when provided. "
-            "Keys are the API's camelCase names (`identifier`, `name`, `schedule` for the cron expression, "
-            "`timezone`, `format`, `destinationType`, …). Use it only for body shapes the typed fields cannot "
-            "express; note the cron expression goes in the `cron` field when using the typed fields."
+            "Escape hatch: the raw request body, sent verbatim. **Mutually exclusive with every typed field "
+            "above** — combining them is rejected rather than silently dropping the typed values. Keys are the "
+            "API's camelCase names (`identifier`, `name`, `schedule` for the cron expression, `timezone`, "
+            "`format`, `destinationType`, …). Use it only for body shapes the typed fields cannot express; with "
+            "the typed fields the cron expression goes in `cron`."
         ),
     )
+
+    @model_validator(mode="after")
+    def _reject_body_with_typed_fields(self) -> Self:
+        """`body` replaces the whole payload, so mixing it with typed fields is ambiguous."""
+        if self.body is None:
+            return self
+        supplied = sorted(name for name, _ in _WRITE_FIELD_MAP if getattr(self, name) is not None)
+        if supplied:
+            raise ValueError(
+                "`body` sends the raw request payload and cannot be combined with the typed field(s): "
+                + ", ".join(supplied)
+                + ". Put everything in `body`, or drop `body` and use the typed fields."
+            )
+        return self
 
 
 class ListSchedulesInput(BaseModel):
@@ -441,15 +456,15 @@ class CreateScheduleInput(_ScheduleWriteFields):
 
     @model_validator(mode="after")
     def _require_core_fields(self) -> Self:
-        """Enforce the endpoint's required fields unless a raw `schedule` body is supplied."""
-        if self.schedule is not None:
+        """Enforce the endpoint's required fields unless a raw `body` is supplied."""
+        if self.body is not None:
             return self
         missing = [name for name in _CREATE_REQUIRED_FIELDS if getattr(self, name) is None]
         if missing:
             raise ValueError(
                 "Missing required field(s) for creating a schedule: "
                 + ", ".join(missing)
-                + " (or pass the whole body in `schedule`)."
+                + " (or pass the whole payload in `body`)."
             )
         return self
 
@@ -462,10 +477,10 @@ class UpdateScheduleInput(_ScheduleWriteFields):
     @model_validator(mode="after")
     def _require_one_change(self) -> Self:
         """Refuse an update that would send an empty body."""
-        if self.schedule is not None:
+        if self.body is not None:
             return self
         if not any(getattr(self, name) is not None for name, _ in _WRITE_FIELD_MAP):
-            raise ValueError("Provide at least one field to update (or pass the whole body in `schedule`).")
+            raise ValueError("Provide at least one field to update (or pass the whole payload in `body`).")
         return self
 
 
@@ -624,11 +639,12 @@ class BulkManageEmailOnlyUsersInput(BaseModel):
 def _write_body(params: _ScheduleWriteFields) -> dict[str, Any]:
     """Assemble the create/update body, omitting `None`s.
 
-    A raw `schedule` dict wins outright: it is sent verbatim so callers can
-    express body shapes the typed fields do not cover.
+    A raw `body` dict is sent verbatim so callers can express payload shapes the
+    typed fields do not cover; the input models guarantee the two are never
+    combined, so nothing typed is silently dropped here.
     """
-    if params.schedule is not None:
-        return dict(params.schedule)
+    if params.body is not None:
+        return dict(params.body)
     body: dict[str, Any] = {}
     for field_name, api_key in _WRITE_FIELD_MAP:
         value = getattr(params, field_name)
@@ -982,7 +998,7 @@ async def omni_create_schedule(params: CreateScheduleInput) -> str:
     - SFTP XLSX: `{"params": {"identifier": "12db1a0a", "name": "Nightly export", "cron": "0 2 ? * * *", "timezone": "UTC", "format": "xlsx", "destination_type": "sftp", "address": "sftp.example.com", "port": 22, "username": "reporting", "path": "/uploads/nightly", "password_unencrypted": "…"}}`
     - Amazon S3 CSV: `{"params": {"identifier": "12db1a0a", "name": "Daily export", "cron": "0 9 ? * * *", "timezone": "UTC", "format": "csv", "destination_type": "s3", "bucket_name": "reports-bucket", "region": "us-east-1", "role_arn": "arn:aws:iam::123456789012:role/DeliveryRole", "key_prefix": "reports/daily/", "filename": "{{entityName}}-{{currentDate}}"}}`
     - Alert on results: `{"params": {"identifier": "12db1a0a", "name": "Data alert", "cron": "0 */6 * * ? *", "timezone": "UTC", "format": "json", "destination_type": "webhook", "url": "https://example.com/hooks/alert", "condition_type": "RESULTS_PRESENT", "condition_query_map_key": "1", "query_identifier_map_key": "1", "override_row_limit": true, "max_row_limit": 1000}}`
-    - Raw body escape hatch: `{"params": {"schedule": {"identifier": "12db1a0a", "name": "Raw", "schedule": "0 9 ? * * *", "timezone": "UTC", "format": "csv", "destinationType": "email", "recipients": ["analyst@example.com"], "subject": "Raw"}}}`
+    - Raw body escape hatch (alone — never mixed with the typed fields): `{"params": {"body": {"identifier": "12db1a0a", "name": "Raw", "schedule": "0 9 ? * * *", "timezone": "UTC", "format": "csv", "destinationType": "email", "recipients": ["analyst@example.com"], "subject": "Raw"}}}`
 
     Error Handling:
     400 covers invalid cron expressions, non-IANA timezones, filter keys the
@@ -1055,7 +1071,7 @@ async def omni_update_schedule(params: UpdateScheduleInput) -> str:
     - Move to Mondays at 09:00: `{"params": {"schedule_id": "123e4567-e89b-12d3-a456-426614174000", "cron": "0 9 ? * MON *", "timezone": "America/New_York"}}`
     - Change the email subject and recipients: `{"params": {"schedule_id": "123e4567-e89b-12d3-a456-426614174000", "subject": "Weekly Sales", "recipients": ["lead@example.com"]}}`
     - Switch to landscape letter PDF: `{"params": {"schedule_id": "123e4567-e89b-12d3-a456-426614174000", "format": "pdf", "paper_format": "letter", "paper_orientation": "landscape"}}`
-    - Raw body escape hatch: `{"params": {"schedule_id": "123e4567-e89b-12d3-a456-426614174000", "schedule": {"name": "Weekly Sales Report", "schedule": "0 9 ? * MON *", "timezone": "America/New_York"}}}`
+    - Raw body escape hatch (alone — never mixed with the typed fields): `{"params": {"schedule_id": "123e4567-e89b-12d3-a456-426614174000", "body": {"name": "Weekly Sales Report", "schedule": "0 9 ? * MON *", "timezone": "America/New_York"}}}`
 
     Error Handling:
     400 covers an invalid UUID, an invalid cron expression, a non-IANA timezone,
@@ -1208,7 +1224,7 @@ async def omni_resume_schedule(params: ResumeScheduleInput) -> str:
     annotations=ToolAnnotations(
         title="Trigger Schedule Now (sends a real delivery)",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1262,7 +1278,7 @@ async def omni_trigger_schedule(params: TriggerScheduleInput) -> str:
     annotations=ToolAnnotations(
         title="Transfer Schedule Ownership",
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

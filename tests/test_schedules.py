@@ -407,6 +407,47 @@ async def test_create_schedule_sftp_body(monkeypatch: pytest.MonkeyPatch) -> Non
     assert body["passwordUnencrypted"] == "s3cret"
 
 
+async def test_create_schedule_never_echoes_the_sftp_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _patch(monkeypatch, _FakeClient(payload={"id": "new-3b"}))
+
+    result = await omni_create_schedule(
+        CreateScheduleInput(
+            identifier="12db1a0a",
+            name="Nightly export",
+            cron="0 2 ? * * *",
+            timezone="UTC",
+            format="xlsx",
+            destination_type="sftp",
+            address="sftp.example.com",
+            port=22,
+            username="reporting",
+            password_unencrypted="sup3r-s3cret",
+        )
+    )
+
+    assert fake.calls[0][2]["json_body"]["passwordUnencrypted"] == "sup3r-s3cret"
+    assert "sup3r-s3cret" not in result
+    assert "passwordUnencrypted" not in result
+
+
+async def test_get_schedule_never_echoes_destination_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = dict(GET_PAYLOAD)
+    payload["destinations"] = [
+        {
+            "id": "dest-2",
+            "format": "xlsx",
+            "metadata": {"type": "sftp", "passwordUnencrypted": "sup3r-s3cret"},
+            "recipients": [],
+        }
+    ]
+    _patch(monkeypatch, _FakeClient(payload=payload))
+
+    result = await omni_get_schedule(GetScheduleInput(schedule_id=SCHEDULE_ID))
+
+    assert "sftp" in result
+    assert "sup3r-s3cret" not in result
+
+
 async def test_create_schedule_s3_reports_trust_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _patch(
         monkeypatch,
@@ -442,7 +483,7 @@ async def test_create_schedule_s3_reports_trust_policy(monkeypatch: pytest.Monke
     assert "ext-123" in result
 
 
-async def test_create_schedule_raw_body_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_schedule_raw_body_alone_is_sent_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _patch(monkeypatch, _FakeClient(payload={"id": "new-5"}))
     raw = {
         "identifier": "raw-dash",
@@ -455,21 +496,26 @@ async def test_create_schedule_raw_body_wins(monkeypatch: pytest.MonkeyPatch) ->
         "subject": "Raw",
     }
 
-    result = await omni_create_schedule(
-        CreateScheduleInput(
-            identifier="ignored",
-            name="Ignored",
-            cron="0 0 ? * * *",
-            timezone="Europe/Madrid",
-            format="pdf",
-            destination_type="slack",
-            schedule=raw,
-        )
-    )
+    result = await omni_create_schedule(CreateScheduleInput(body=raw))
 
-    assert fake.calls[0][2]["json_body"] == raw
+    assert fake.calls == [("POST", "/v1/schedules", {"params": None, "json_body": raw})]
     assert "Created schedule **Raw**" in result
     assert "raw-dash" in result
+
+
+def test_create_rejects_raw_body_mixed_with_typed_fields() -> None:
+    with pytest.raises(ValueError, match="cannot be combined with the typed field"):
+        CreateScheduleInput(
+            name="Ignored",
+            destination_type="slack",
+            body={"identifier": "raw-dash", "name": "Raw"},
+        )
+
+
+def test_create_raw_body_still_allows_the_user_id_query_param(monkeypatch: pytest.MonkeyPatch) -> None:
+    params = CreateScheduleInput(body={"identifier": "raw-dash", "name": "Raw"}, user_id="membership-1")
+
+    assert params.user_id == "membership-1"
 
 
 async def test_create_schedule_passes_user_id_and_test_now(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -576,13 +622,18 @@ async def test_update_schedule_sends_only_given_fields(monkeypatch: pytest.Monke
     assert "`schedule`" in result
 
 
-async def test_update_schedule_raw_body_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_schedule_raw_body_alone_is_sent_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _patch(monkeypatch, _FakeClient(payload={"success": True}))
     raw = {"name": "Weekly Sales Report", "schedule": "0 9 ? * MON *", "timezone": "America/New_York"}
 
-    await omni_update_schedule(UpdateScheduleInput(schedule_id=SCHEDULE_ID, name="ignored", schedule=raw))
+    await omni_update_schedule(UpdateScheduleInput(schedule_id=SCHEDULE_ID, body=raw))
 
-    assert fake.calls[0][2]["json_body"] == raw
+    assert fake.calls == [("PUT", SCHEDULE_PATH, {"json_body": raw})]
+
+
+def test_update_rejects_raw_body_mixed_with_typed_fields() -> None:
+    with pytest.raises(ValueError, match="cannot be combined with the typed field"):
+        UpdateScheduleInput(schedule_id=SCHEDULE_ID, name="ignored", body={"name": "Raw"})
 
 
 async def test_update_schedule_error_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -901,9 +952,24 @@ def test_create_requires_core_fields() -> None:
 
 
 def test_create_accepts_raw_body_without_core_fields() -> None:
-    params = CreateScheduleInput(schedule={"identifier": "12db1a0a", "name": "Raw"})
+    params = CreateScheduleInput(body={"identifier": "12db1a0a", "name": "Raw"})
 
-    assert params.schedule == {"identifier": "12db1a0a", "name": "Raw"}
+    assert params.body == {"identifier": "12db1a0a", "name": "Raw"}
+
+
+def test_cron_string_is_accepted_where_the_api_documents_schedule() -> None:
+    """The API's `schedule` key is a cron string, so `body` must not shadow that name."""
+    params = CreateScheduleInput(
+        identifier="12db1a0a",
+        name="Daily",
+        cron="0 9 ? * MON *",
+        timezone="UTC",
+        format="csv",
+        destination_type="email",
+    )
+
+    assert params.cron == "0 9 ? * MON *"
+    assert params.body is None
 
 
 def test_update_requires_at_least_one_field() -> None:
@@ -984,3 +1050,15 @@ def test_inputs_reject_unknown_fields() -> None:
         ListScheduleRecipientsInput(schedule_id=SCHEDULE_ID, unexpected="x")  # type: ignore[call-arg]
     with pytest.raises(ValueError):
         ManageEmailOnlyUserInput(email="a@example.com", unexpected="x")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        CreateScheduleInput(body={"name": "Raw"}, unexpected="x")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        UpdateScheduleInput(schedule_id=SCHEDULE_ID, name="n", unexpected="x")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        AddScheduleRecipientsInput(schedule_id=SCHEDULE_ID, emails=["a@example.com"], unexpected="x")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        RemoveScheduleRecipientsInput(schedule_id=SCHEDULE_ID, emails=["a@example.com"], unexpected="x")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        BulkManageEmailOnlyUsersInput(users=[EmailOnlyUserSpec(email="a@example.com")], unexpected="x")  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        EmailOnlyUserSpec(email="a@example.com", unexpected="x")  # type: ignore[call-arg]
