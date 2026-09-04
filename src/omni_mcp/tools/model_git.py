@@ -38,11 +38,11 @@ JSON output.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
-from urllib.parse import quote
+from typing import Annotated, Any, Literal
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from omni_mcp.client import get_client
 from omni_mcp.errors import handle_api_error
@@ -63,6 +63,9 @@ GitServiceProvider = Literal["auto", "github", "gitlab", "azure_devops", "bitbuc
 
 #: When Omni requires a pull request for model changes.
 RequirePullRequest = Literal["always", "users-only", "never"]
+
+#: A PEM key must keep its exact bytes — leading/trailing newlines included.
+PemStr = Annotated[str, StringConstraints(strip_whitespace=False)]
 
 
 def _is_sensitive(key: str) -> bool:
@@ -102,6 +105,24 @@ def _as_dict(payload: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _safe_url(value: Any) -> Any:
+    """Replace the `user:password@` part of an HTTP(S) clone URL with the redaction marker.
+
+    `https://x-access-token:<PAT>@github.com/org/repo.git` is a valid clone URL,
+    so a token can reach this server both in the caller's `clone_url` and in the
+    API's `cloneUrl` — and neither may be echoed back. SSH URLs
+    (`git@github.com:org/repo.git`, `ssh://git@host/repo`) carry a user name
+    rather than a credential and are left alone.
+    """
+    if not isinstance(value, str) or "@" not in value:
+        return value
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or "@" not in parsed.netloc:
+        return value
+    host = parsed.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parsed.scheme, f"{REDACTED}@{host}", parsed.path, parsed.query, parsed.fragment))
+
+
 def _flag(value: Any) -> str:
     """Render a tri-state boolean from the API."""
     if value is None:
@@ -122,7 +143,7 @@ def _config_markdown(config: Mapping[str, Any], title: str) -> str:
     lines = [
         f"# {title}",
         "",
-        f"- Repository (`cloneUrl`): `{_text(config.get('cloneUrl') or config.get('sshUrl'))}`",
+        f"- Repository (`cloneUrl`): `{_text(_safe_url(config.get('cloneUrl') or config.get('sshUrl')))}`",
         f"- Auth method: **{_text(config.get('authMethod'), 'not reported')}**",
         f"- Git provider: **{_text(config.get('gitServiceProvider'), 'not reported')}**",
         f"- Base branch: `{_text(config.get('baseBranch'))}`",
@@ -246,7 +267,7 @@ class CreateGitConfigurationInput(BaseModel):
             "through a tunnel/VPC and differs from the inferred HTTPS address."
         ),
     )
-    deploy_private_key: str | None = Field(
+    deploy_private_key: PemStr | None = Field(
         default=None,
         description=(
             "**SSH authentication only.** Your own RSA or ED25519 private key in PEM format (OpenSSH, PKCS#1 or "
@@ -325,7 +346,7 @@ class UpdateGitConfigurationInput(BaseModel):
             "from the inferred HTTPS address."
         ),
     )
-    deploy_private_key: str | None = Field(
+    deploy_private_key: PemStr | None = Field(
         default=None,
         description=(
             "**SSH authentication only.** Replacement RSA or ED25519 private key in PEM format; the new key takes "
@@ -579,7 +600,7 @@ async def omni_create_git_configuration(params: CreateGitConfigurationInput) -> 
         lines = [
             f"Created the git configuration for model `{params.model_id}`.",
             "",
-            f"- Repository: `{_text(config.get('cloneUrl') or params.clone_url)}`",
+            f"- Repository: `{_text(_safe_url(config.get('cloneUrl') or params.clone_url))}`",
             f"- Auth method: **{_text(config.get('authMethod') or params.auth_method, 'not reported')}**",
             f"- Provider: **{_text(config.get('gitServiceProvider'), 'not reported')}**",
             f"- Base branch: `{_text(config.get('baseBranch'))}`",
@@ -654,7 +675,9 @@ async def omni_update_git_configuration(params: UpdateGitConfigurationInput) -> 
     `Encrypted key requires deployKeyPassphrase`, `deployKeyPassphrase cannot
     be provided without deployPrivateKey`, `deployPrivateKey not supported with
     authMethod: https_token`). `404` means the model does not exist or has no
-    git configuration.
+    git configuration. `clone_url` is sent as `cloneUrl`; on an instance old
+    enough to reject that key, the repository URL is the deprecated `sshUrl`
+    field instead.
     """
     try:
         # `cloneUrl` is the modern name of the deprecated `sshUrl` body field —
@@ -677,7 +700,7 @@ async def omni_update_git_configuration(params: UpdateGitConfigurationInput) -> 
             }
         )
         if not body:
-            return "Error (400): Bad request – no fields to update. Supply at least one field besides `model_id`."
+            return "Error: no fields to update — supply at least one field besides `model_id`. No request was sent."
         payload = await get_client().request_json(
             "PATCH", f"/v1/models/{_path_segment(params.model_id)}/git", json_body=body
         )
@@ -686,7 +709,7 @@ async def omni_update_git_configuration(params: UpdateGitConfigurationInput) -> 
         lines = [
             f"Updated the git configuration for model `{params.model_id}` — fields updated: {updated}.",
             "",
-            f"- Repository: `{_text(config.get('cloneUrl') or config.get('sshUrl'))}`",
+            f"- Repository: `{_text(_safe_url(config.get('cloneUrl') or config.get('sshUrl')))}`",
             f"- Auth method: **{_text(config.get('authMethod'), 'not reported')}**",
             f"- Base branch: `{_text(config.get('baseBranch'))}`",
             f"- Pull requests required: **{_text(config.get('requirePullRequest'), 'not reported')}**",
@@ -892,8 +915,9 @@ async def omni_create_or_update_model_branch_pull_request(
     try:
         if params.allow_branch_exists is False and params.require_branch_exists is True:
             return (
-                "Error (400): Bad request – cannot set both `allow_branch_exists=false` (create-only) and "
-                "`require_branch_exists=true` (update-only). Pick one mode, or omit both to create or update."
+                "Error: cannot set both `allow_branch_exists=false` (create-only) and "
+                "`require_branch_exists=true` (update-only). Pick one mode, or omit both to create or update. "
+                "No request was sent."
             )
         body = _compact(
             {
@@ -1014,7 +1038,7 @@ async def omni_merge_model_branch(params: MergeModelBranchInput) -> str:
         ]
         if params.delete_branch:
             lines.append(f"- Branch `{params.branch_name}` was requested to be deleted after the merge.")
-        if not result.get("git_synced"):
+        if result.get("git_synced") is False:
             lines.extend(
                 [
                     "",

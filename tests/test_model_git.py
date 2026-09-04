@@ -249,7 +249,9 @@ async def test_update_git_configuration_requires_a_field(monkeypatch: pytest.Mon
 
     result = await omni_update_git_configuration(UpdateGitConfigurationInput(model_id=MODEL_ID))
 
-    assert result.startswith("Error (400):")
+    # A client-side refusal, not an API answer — it must not impersonate one.
+    assert result.startswith("Error: no fields to update")
+    assert "(400)" not in result
     assert fake.calls == []
 
 
@@ -370,7 +372,9 @@ async def test_create_or_update_pull_request_rejects_conflicting_modes(monkeypat
         )
     )
 
-    assert result.startswith("Error (400):")
+    # A client-side refusal, not an API answer — it must not impersonate one.
+    assert result.startswith("Error: cannot set both")
+    assert "(400)" not in result
     assert fake.calls == []
 
 
@@ -510,3 +514,44 @@ def test_inputs_reject_unknown_fields() -> None:
         SyncModelWithGitInput(model_id=MODEL_ID, message="x")  # type: ignore[call-arg]
     with pytest.raises(ValueError):
         MergeModelBranchInput(model_id=MODEL_ID, branch_name="x", squash=True)  # type: ignore[call-arg]
+
+
+def test_deploy_private_key_keeps_its_trailing_newline() -> None:
+    """A PEM key is byte-exact — stripping its trailing newline breaks the key."""
+    pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+
+    for model in (CreateGitConfigurationInput, UpdateGitConfigurationInput):
+        params = model(model_id=MODEL_ID, clone_url="git@github.com:org/repo.git", deploy_private_key=pem)
+        assert params.deploy_private_key == pem
+
+
+async def test_create_git_configuration_strips_userinfo_from_the_clone_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTTPS clone URL can carry a token; it must never be echoed back."""
+    secret_url = "https://x-access-token:ghp_supersecrettoken@github.com/org/repo.git"
+    _patch(monkeypatch, _FakeClient(payload={"cloneUrl": secret_url, "authMethod": "https_token"}))
+
+    result = await omni_create_git_configuration(
+        CreateGitConfigurationInput(model_id=MODEL_ID, clone_url=secret_url, auth_method="https_token")
+    )
+
+    assert "ghp_supersecrettoken" not in result
+    assert "github.com/org/repo.git" in result
+
+
+async def test_merge_reports_an_unsynced_git_only_when_the_api_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The advisory keys off `git_synced is False`, not off a missing key."""
+    _patch(monkeypatch, _FakeClient(payload={"success": True, "published_drafts_count": 1}))
+
+    result = await omni_merge_model_branch(MergeModelBranchInput(model_id=MODEL_ID, branch_name="feature/x"))
+
+    assert "Git was not synced" not in result
+
+    _patch(monkeypatch, _FakeClient(payload={"success": True, "git_synced": False}))
+
+    result = await omni_merge_model_branch(MergeModelBranchInput(model_id=MODEL_ID, branch_name="feature/x"))
+
+    assert "Git was not synced" in result
