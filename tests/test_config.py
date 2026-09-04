@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from omni_mcp.config import Settings, get_settings
 
@@ -64,3 +65,45 @@ def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 
     get_settings.cache_clear()
     assert get_settings().omni_api_key == "second"
+
+
+@pytest.mark.parametrize(
+    ("bad_url", "expected_message"),
+    [
+        ("acme.omniapp.co", "http:// or https://"),
+        ("//acme.omniapp.co", "http:// or https://"),
+        ("ftp://acme.omniapp.co", "http:// or https://"),
+        ("https://", "must include a host"),
+        ("https://acme.omniapp.co/api/v1", "instance root"),
+        ("https://acme.omniapp.co/api/v1/users", "instance root"),
+        ("https://acme.omniapp.co/bi", "instance root"),
+        ("https://acme.omniapp.co?token=x", "query string or fragment"),
+    ],
+)
+def test_base_url_validator_rejects_bad_values(bad_url: str, expected_message: str) -> None:
+    with pytest.raises(ValidationError, match=expected_message):
+        Settings(omni_base_url=bad_url)
+
+
+@pytest.mark.parametrize(
+    "good_url",
+    [
+        "",
+        "   ",
+        "https://acme.omniapp.co",
+        "https://acme.omniapp.co/",
+        "https://acme.omniapp.co/api",
+        "https://acme.omniapp.co/api/",
+        "http://localhost:3000",
+        "https://acme.playground.exploreomni.dev/api",
+    ],
+)
+def test_base_url_validator_accepts_instance_roots(good_url: str) -> None:
+    Settings(omni_base_url=good_url)
+
+
+def test_base_url_validator_applies_to_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OMNI_BASE_URL", "acme.omniapp.co")
+
+    with pytest.raises(ValidationError, match="http:// or https://"):
+        Settings()

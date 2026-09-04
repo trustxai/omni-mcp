@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,9 +33,39 @@ class Settings(BaseSettings):
     # Extra attempts after the first one, for 429 and 502/503/504 responses.
     omni_max_retries: int = 3
 
-    # Tool results are truncated below this many characters, keeping responses
-    # under the MCP 1 MB tool-result ceiling.
+    # Tool results are truncated above this many UTF-8 *bytes*, keeping responses
+    # under the MCP 1 MB tool-result ceiling. (The name says `chars` for
+    # backwards compatibility; the budget has always been about payload size.)
     omni_max_result_chars: int = 900_000
+
+    @field_validator("omni_base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        """Reject instance URLs that would silently build wrong request URLs.
+
+        An empty value stays empty so importing the package never fails; the
+        missing-credentials error surfaces on the first request instead.
+        """
+        raw = value.strip()
+        if not raw:
+            return ""
+        parsed = urlsplit(raw)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(
+                "OMNI_BASE_URL must start with http:// or https:// "
+                "(for example https://your-instance.omniapp.co), got: " + raw
+            )
+        if not parsed.netloc:
+            raise ValueError("OMNI_BASE_URL must include a host, for example https://your-instance.omniapp.co")
+        if parsed.query or parsed.fragment:
+            raise ValueError("OMNI_BASE_URL must not contain a query string or fragment, got: " + raw)
+        path = parsed.path.rstrip("/")
+        if path not in ("", "/api"):
+            raise ValueError(
+                "OMNI_BASE_URL must be the instance root, optionally ending in /api "
+                "(tools supply the rest of the path, e.g. /v1/users), got: " + raw
+            )
+        return raw
 
     @property
     def api_root(self) -> str:
