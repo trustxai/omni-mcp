@@ -397,7 +397,10 @@ async def test_move_document_to_root_sends_null_folder_path(monkeypatch: pytest.
     result = await omni_move_document(MoveDocumentInput(document_id="abc123", to_root=True))
 
     assert "the root level" in result
+    # `to_root` is the only way to get here, and it sends an explicit null.
     assert fake.calls == [("PUT", "/v1/documents/abc123/move", {"json_body": {"folderPath": None}})]
+    _, _, kwargs = fake.calls[0]
+    assert kwargs["json_body"]["folderPath"] is None
 
 
 def test_move_document_requires_an_explicit_destination() -> None:

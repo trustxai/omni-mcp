@@ -725,7 +725,6 @@ async def omni_move_document(params: MoveDocumentInput) -> str:
     Examples:
     - Into a folder: `{"params": {"document_id": "12db1a0a", "folder_path": "/reports/2026/q1"}}`
     - Out of every folder: `{"params": {"document_id": "12db1a0a", "to_root": true}}`
-    - To the root: `{"params": {"document_id": "12db1a0a"}}`
     - With a scope: `{"params": {"document_id": "12db1a0a", "folder_path": "/shared", "scope": "organization"}}`
 
     Error Handling:
