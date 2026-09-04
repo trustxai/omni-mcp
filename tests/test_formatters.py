@@ -14,6 +14,7 @@ import pyarrow as pa
 import pytest
 
 from omni_mcp.formatters import (
+    SHORT_TRUNCATION_NOTE,
     ResponseFormat,
     cursor_paginated_response,
     decode_arrow_base64,
@@ -320,3 +321,19 @@ def test_truncate_result_never_splits_a_code_point() -> None:
 
     # Decodes cleanly: the byte cut dropped any partial code point.
     assert result.encode("utf-8").decode("utf-8") == result
+
+
+@pytest.mark.parametrize("limit", [1, 4, 10, 11, 12, 20, 60, 90, 200])
+def test_truncate_result_never_exceeds_the_limit(limit: int) -> None:
+    # Including limits smaller than the marker itself: the budget always wins.
+    assert len(truncate_result("x" * 500, limit=limit).encode("utf-8")) <= limit
+
+
+def test_truncate_result_shortens_the_marker_that_does_not_fit() -> None:
+    result = truncate_result("x" * 500, limit=20)
+
+    assert result == "x" * (20 - len(SHORT_TRUNCATION_NOTE)) + SHORT_TRUNCATION_NOTE
+
+
+def test_truncate_result_drops_the_marker_when_even_the_short_one_does_not_fit() -> None:
+    assert truncate_result("x" * 500, limit=4) == "xxxx"
