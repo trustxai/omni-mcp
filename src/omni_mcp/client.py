@@ -19,7 +19,12 @@ RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
 BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0, 2.0)
 
 #: A single 429 wait is never longer than this, however large `Retry-After` is.
-MAX_RETRY_AFTER_SECONDS = 30.0
+MAX_RETRY_AFTER_SECONDS = 60.0
+
+#: Total time one request may spend sleeping between retries. Once the next
+#: wait would cross this budget the client stops retrying and surfaces the
+#: response, so a tool call cannot hang for minutes behind a rate limit.
+MAX_TOTAL_RETRY_WAIT_SECONDS = 90.0
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -116,8 +121,18 @@ class OmniClient:
         effective_timeout = timeout if timeout is not None else settings.omni_request_timeout_seconds
         attempts = 1 + max(settings.omni_max_retries, 0)
         response: httpx.Response | None = None
+        total_wait = 0.0
 
-        async with httpx.AsyncClient(timeout=effective_timeout, transport=self._transport) as client:
+        # One AsyncClient per request: tool calls are short and infrequent
+        # (60 requests/minute per key), so a pooled client buys nothing and a
+        # per-request client keeps the transport injectable for tests.
+        # `follow_redirects` matters — without it a 3xx would come back as an
+        # empty "successful" response and decode to None.
+        async with httpx.AsyncClient(
+            timeout=effective_timeout,
+            transport=self._transport,
+            follow_redirects=True,
+        ) as client:
             for attempt in range(attempts):
                 response = await client.request(
                     method,
@@ -133,12 +148,17 @@ class OmniClient:
                     break
                 backoff = BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)]
                 if response.status_code == 429:
-                    await self._sleep(_retry_after_seconds(response, backoff))
-                    continue
-                if response.status_code in RETRYABLE_STATUS_CODES:
-                    await self._sleep(backoff)
-                    continue
-                break
+                    delay = _retry_after_seconds(response, backoff)
+                elif response.status_code in RETRYABLE_STATUS_CODES:
+                    delay = backoff
+                else:
+                    break
+                if total_wait + delay > MAX_TOTAL_RETRY_WAIT_SECONDS:
+                    # Out of retry budget: surface the response instead of
+                    # blocking the tool call any longer.
+                    break
+                total_wait += delay
+                await self._sleep(delay)
 
         assert response is not None  # attempts >= 1, so the loop always ran
         response.raise_for_status()
