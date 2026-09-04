@@ -17,3 +17,6 @@ wheels/
 .loop/
 loop.config.json
 .claude/settings.local.json
+
+# Harness-managed worktrees for parallel lanes
+.claude/worktrees/
