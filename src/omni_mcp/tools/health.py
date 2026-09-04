@@ -7,16 +7,17 @@ Lane workers: copy this module's shape (input model, decorator + annotations,
 
 from __future__ import annotations
 
+import os
 import pkgutil
 from typing import Any
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import omni_mcp.tools
 from omni_mcp.client import get_client
 from omni_mcp.config import get_settings
-from omni_mcp.errors import handle_api_error
+from omni_mcp.errors import handle_api_error, validation_error_detail
 from omni_mcp.formatters import ResponseFormat, to_json, truncate_result
 from omni_mcp.server import mcp
 
@@ -70,6 +71,47 @@ def _summarize_roles(roles_by_model: dict[str, Any], limit: int = 10) -> list[st
     if remaining > 0:
         lines.append(f"- _… {remaining:,} more model(s) not shown; pass `model_id` to scope the result._")
     return lines
+
+
+def _rejected_base_url(exc: ValidationError) -> str:
+    """The `OMNI_BASE_URL` the server was actually handed, for the error report.
+
+    Read from the environment first; a value that came from a `.env` file is
+    recovered from the input pydantic recorded on the validation error.
+    """
+    from_env = os.environ.get("OMNI_BASE_URL")
+    if from_env is not None:
+        return from_env
+    for error in exc.errors():
+        if error.get("loc") == ("omni_base_url",):
+            return str(error.get("input", ""))
+    return ""
+
+
+def _invalid_configuration_report(exc: ValidationError) -> str:
+    """What `omni_get_api_info` prints when `Settings()` refuses to load.
+
+    Echoes the rejected instance URL — never the API key — so the typo is
+    visible to whoever is fixing the environment.
+    """
+    rejected = _rejected_base_url(exc)
+    key_configured = bool(os.environ.get("OMNI_API_KEY", "").strip())
+    lines = [
+        "# Omni MCP configuration",
+        "",
+        "**Invalid configuration** — the settings could not be loaded, so no tool can reach the API.",
+        "",
+        f"- Problem: {validation_error_detail(exc)}",
+        f"- `OMNI_BASE_URL` as given: `{rejected}`" if rejected else "- `OMNI_BASE_URL` as given: (empty)",
+        f"- API key: {'configured' if key_configured else 'NOT configured (set OMNI_API_KEY)'}",
+        "",
+        "Fix the variable in the environment or `.env`, then restart the server.",
+        "",
+        f"## Tool modules ({len(TOOL_MODULES)})",
+        "",
+        ", ".join(f"`{module}`" for module in TOOL_MODULES),
+    ]
+    return "\n".join(lines)
 
 
 @mcp.tool(
@@ -189,8 +231,10 @@ async def omni_get_api_info(params: ApiInfoInput) -> str:
     - `{"params": {}}`
 
     Error Handling:
-    Makes no network call, so it only fails if the environment cannot be read;
-    any failure comes back as an `Error ...` string.
+    Makes no network call. When an `OMNI_*` variable is malformed and the
+    settings refuse to load, this tool still answers: it reports the rejected
+    `OMNI_BASE_URL` and why it was rejected (the API key is never echoed), so
+    the misconfiguration is visible instead of opaque.
     """
     try:
         settings = get_settings()
@@ -213,5 +257,12 @@ async def omni_get_api_info(params: ApiInfoInput) -> str:
             ", ".join(f"`{module}`" for module in TOOL_MODULES),
         ]
         return truncate_result("\n".join(lines))
+    except ValidationError as exc:
+        # A malformed OMNI_* variable makes `Settings()` itself raise. This is
+        # the tool people reach for when nothing works, so report the bad value
+        # rather than handing back an error string. Returned untruncated on
+        # purpose: the report is a few fixed lines, and `truncate_result` would
+        # need the very settings that just failed to load.
+        return _invalid_configuration_report(exc)
     except Exception as exc:
         return handle_api_error(exc)
