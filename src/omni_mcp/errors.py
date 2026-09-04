@@ -92,11 +92,14 @@ def handle_api_error(exc: Exception) -> str:
         if status == 410:
             link = response.headers.get("link", "")
             sunset = response.headers.get("sunset", "")
+            deprecation = response.headers.get("deprecation", "")
             parts = [f"Error (410): Endpoint removed – {detail}."]
             if link:
                 parts.append(f"Successor: {link}.")
             if sunset:
                 parts.append(f"Removed on {sunset}.")
+            if deprecation:
+                parts.append(f"Deprecation: {deprecation}.")
             parts.append("Use the replacement endpoint's tool instead.")
             return " ".join(parts)
         if status == 429:

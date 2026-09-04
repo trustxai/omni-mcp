@@ -107,6 +107,15 @@ def test_410_shows_successor_link_and_sunset() -> None:
     assert message.startswith("Error (410):")
     assert "documents-v2/create-document" in message
     assert "2026-07-31" in message
+    assert "Deprecation: true" in message
+
+
+def test_410_without_headers_still_explains() -> None:
+    message = handle_api_error(_status_error(410, json_body={"detail": "This endpoint has been removed"}))
+
+    assert message.startswith("Error (410):")
+    assert "replacement endpoint" in message
+    assert "Deprecation" not in message
 
 
 def test_unmapped_status_falls_back_to_detail() -> None:
