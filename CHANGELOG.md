@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/trustxai/omni-mcp/compare/v0.2.0...v0.2.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **packaging:** publish the distribution as omni-app-mcp ([#27](https://github.com/trustxai/omni-mcp/issues/27)) ([c3ab901](https://github.com/trustxai/omni-mcp/commit/c3ab9012a52c0ff8a1d0b023b0c182f74b15c64d))
+
 ## [0.2.0](https://github.com/trustxai/omni-mcp/compare/v0.1.0...v0.2.0) (2026-09-04)
 
 
