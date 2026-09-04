@@ -4,6 +4,9 @@ Used to fill the `<!-- TOOL_TABLE_START -->` / `<!-- TOOL_TABLE_END -->` block
 in README.md:
 
     uv run python scripts/tool_table.py
+
+Exits non-zero, printing nothing to stdout, when a registered tool cannot be
+traced back to the module that implements it.
 """
 
 from __future__ import annotations
@@ -12,9 +15,28 @@ import asyncio
 import importlib
 import pkgutil
 import sys
+from collections.abc import Iterable
 
 import omni_mcp.tools
 from omni_mcp.server import mcp
+
+
+class ToolAttributionError(RuntimeError):
+    """Raised when a registered tool cannot be traced back to a tool module.
+
+    Emitting an `unknown` group instead would hide the real problem: the tool's
+    `name=` and the function implementing it have drifted apart, which also
+    breaks anything else keyed on that house rule.
+    """
+
+    def __init__(self, tool_names: Iterable[str]) -> None:
+        self.tool_names: list[str] = sorted(tool_names)
+        super().__init__(
+            f"cannot attribute {len(self.tool_names)} registered tool(s) to a module: "
+            + ", ".join(self.tool_names)
+            + ". Every tool's registered `name=` must match the function that implements it "
+            "(see CONTRIBUTING.md) — rename the function or the tool so they agree."
+        )
 
 
 def _one_line(description: str | None) -> str:
@@ -48,13 +70,23 @@ def _read_only(tool: object) -> str:
     return "read-only" if read_only else "writes"
 
 
-async def collect() -> dict[str, list[tuple[str, str, str]]]:
-    """Group `(name, description, read-only flag)` rows by tool module."""
-    index = module_index()
+async def collect(index: dict[str, str] | None = None) -> dict[str, list[tuple[str, str, str]]]:
+    """Group `(name, description, read-only flag)` rows by tool module.
+
+    Raises `ToolAttributionError` when any registered tool falls outside
+    `index` (by default `module_index()`).
+    """
+    index = module_index() if index is None else index
     grouped: dict[str, list[tuple[str, str, str]]] = {}
+    unattributed: list[str] = []
     for tool in await mcp.list_tools():
-        module = index.get(tool.name, "unknown")
+        module = index.get(tool.name)
+        if module is None:
+            unattributed.append(tool.name)
+            continue
         grouped.setdefault(module, []).append((tool.name, _one_line(tool.description), _read_only(tool)))
+    if unattributed:
+        raise ToolAttributionError(unattributed)
     for rows in grouped.values():
         rows.sort(key=lambda row: row[0])
     return dict(sorted(grouped.items()))
@@ -75,7 +107,14 @@ def render(grouped: dict[str, list[tuple[str, str, str]]]) -> str:
 
 
 def main() -> int:
-    sys.stdout.write(render(asyncio.run(collect())))
+    try:
+        grouped = asyncio.run(collect())
+    except ToolAttributionError as exc:
+        # Non-zero and nothing on stdout: a broken table must never be pasted
+        # into the README by a pipeline that ignores stderr.
+        sys.stderr.write(f"tool_table.py: error: {exc}\n")
+        return 1
+    sys.stdout.write(render(grouped))
     return 0
 
 
