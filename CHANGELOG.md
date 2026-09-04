@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.2.0](https://github.com/trustxai/omni-mcp/compare/v0.1.0...v0.2.0) (2026-09-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* omni_import_dashboard renames `document` to `export_payload`; omni_list_users / omni_list_embed_users JSON output is now the raw SCIM envelope (Resources, totalResults, startIndex, itemsPerPage, schemas); omni_move_document requires folder_path or to_root=true; raw-body overrides (body / scim_body / operations) can no longer be combined with typed fields.
+
+### Bug Fixes
+
+* **ai_governance:** a missing success flag is not a confirmation ([424d900](https://github.com/trustxai/omni-mcp/commit/424d90077e8db24f32ab8ca1ea03dcc012fd968b))
+* **ai_governance:** only an explicit success:false contradicts the 2xx ([24e3376](https://github.com/trustxai/omni-mcp/commit/24e3376bf5c0ac7aab60ebbda1f4b86d8a8a2389))
+* apply review follow-ups across modules ([eb50b9a](https://github.com/trustxai/omni-mcp/commit/eb50b9ab32369d0439aba67280522107c0e84233))
+* **connections:** truncate the mutating confirmations ([c05f483](https://github.com/trustxai/omni-mcp/commit/c05f483a045e1582a310f9c07dab3e9a4c7f9a78))
+* **content:** honest export annotation, closable fence, stricter import pre-flight ([a28606f](https://github.com/trustxai/omni-mcp/commit/a28606fb30d484ac04b0c4f5efb937792d6aa969))
+* **document_access:** send accessBoost only when set, guard the empty PUT ([dba5dd6](https://github.com/trustxai/omni-mcp/commit/dba5dd66fce6008dc60384b3f1624909a84bb184))
+* **documents:** drop the move example the destination guard now rejects ([720c96b](https://github.com/trustxai/omni-mcp/commit/720c96bde1f5b61f82e4a439ba2575816e066854))
+* **documents:** explicit move destination, no empty folderPath, no empty bodies ([dfc5dca](https://github.com/trustxai/omni-mcp/commit/dfc5dcaa2e5309b54f2d0eeb60984918bc4f94eb))
+* **folders:** check success on permission writes, stop inventing a scope ([6efc573](https://github.com/trustxai/omni-mcp/commit/6efc57371f9660e549b35e7ae41b645b80aadfb1))
+* **foundation:** report the rejected setting, keep key state honest, narrow ValidationError ([cea929e](https://github.com/trustxai/omni-mcp/commit/cea929eaf9fe3bf2cde7011faf2b9b74adcabded))
+* **model_git:** strip clone-URL userinfo, keep PEM bytes, drop fake API errors ([e8d1533](https://github.com/trustxai/omni-mcp/commit/e8d1533308458b187d69c0d610f5bac9b3852bcf))
+* **models:** the YAML table's bytes column counts UTF-8 bytes ([2642d7e](https://github.com/trustxai/omni-mcp/commit/2642d7e277c8083d4d078fe335ccc1c856a2202b))
+* tighten input contracts across modules ([b3fc962](https://github.com/trustxai/omni-mcp/commit/b3fc96249252ea746c942d7defe74dd98bb49142))
+* **uploads:** render model_id/created_at, accept an empty 2xx delete ([f99473f](https://github.com/trustxai/omni-mcp/commit/f99473f6c11225c01c7b6da968b0e8ac2a7cfd67))
+* **user_groups:** reject mixed raw overrides, guard renderers and SCIM filters ([634e33c](https://github.com/trustxai/omni-mcp/commit/634e33c8cbf8a50c285fa865509518525f3c4b68))
+* **users:** first-class user_name PATCH, raw SCIM envelope, JSON booleans ([46bf45e](https://github.com/trustxai/omni-mcp/commit/46bf45ed784d447095f481d78c0af5a21d53af05))
+
+
+### Documentation
+
+* regenerate the tool table — omni_export_dashboard now writes ([43df22c](https://github.com/trustxai/omni-mcp/commit/43df22c49460c750658ef788b0d19e4fcb8b46a4))
+
+
+### Miscellaneous Chores
+
+* **release:** pin the next release to 0.2.0 ([5455a62](https://github.com/trustxai/omni-mcp/commit/5455a6265790e03d30a60bd624b8d4c9268c17dd))
+
 ## 0.1.0 (2026-09-04)
 
 
