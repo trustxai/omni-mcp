@@ -277,7 +277,9 @@ async def test_download_file_writes_to_disk(monkeypatch: pytest.MonkeyPatch, con
     assert "Downloaded dashboard file" in result
     assert "application/pdf" in result
     assert str(output_path) in result
-    assert fake.calls == [("GET", "/v1/dashboards/abc123/download/job-1", {})]
+    # `accept: */*` overrides the client's default `application/json` so a binary format
+    # (pdf/png/csv/xlsx/zip) doesn't get content-negotiated into a 406.
+    assert fake.calls == [("GET", "/v1/dashboards/abc123/download/job-1", {"headers": {"accept": "*/*"}})]
 
 
 async def test_download_file_refuses_overwrite(
@@ -390,20 +392,47 @@ async def test_export_polls_then_downloads(monkeypatch: pytest.MonkeyPatch, conf
     assert "job-9" in result
     assert sleeps == [2, 2]
     assert fake.calls[0] == ("POST", "/v1/dashboards/abc123/download", {"params": None, "json_body": {"format": "pdf"}})
-    assert fake.calls[1] == ("GET", "/v1/dashboards/abc123/download/job-9/status", {})
-    assert fake.calls[-1] == ("GET", "/v1/dashboards/abc123/download/job-9", {})
+
+    # Each status poll clamps its own request timeout to the remaining poll budget.
+    status_method, status_path, status_kwargs = fake.calls[1]
+    assert (status_method, status_path) == ("GET", "/v1/dashboards/abc123/download/job-9/status")
+    assert isinstance(status_kwargs.get("timeout"), float)
+    assert status_kwargs["timeout"] > 0
+
+    # The final binary download overrides the client's default `accept: application/json` so a
+    # pdf/png/csv/xlsx/zip response doesn't get content-negotiated into a 406.
+    assert fake.calls[-1] == (
+        "GET",
+        "/v1/dashboards/abc123/download/job-9",
+        {"headers": {"accept": "*/*"}},
+    )
 
 
 async def test_export_times_out_cleanly(monkeypatch: pytest.MonkeyPatch, configured: None, tmp_path: Any) -> None:
+    """The poll deadline is wall-clock based (via the injectable `_monotonic`), not a sum of
+    `poll_interval_seconds`: even though `_sleep` never actually waits, a clock that jumps 50s
+    per call still forces a clean, bounded exit instead of looping until `json_responses` (or
+    real wall-clock time) runs out."""
+
     async def fake_sleep(seconds: float) -> None:
         return None
 
     monkeypatch.setattr(dashboards, "_sleep", fake_sleep)
 
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            value = self.now
+            self.now += 50.0
+            return value
+
+    monkeypatch.setattr(dashboards, "_monotonic", _FakeClock())
+
     fake = _FakeClient(
         json_responses=[
             {"job_id": "job-timeout", "message": "ok"},
-            {"job_id": "job-timeout", "status": "in_progress", "format": "pdf"},
             {"job_id": "job-timeout", "status": "in_progress", "format": "pdf"},
             {"job_id": "job-timeout", "status": "in_progress", "format": "pdf"},
         ],
@@ -417,7 +446,7 @@ async def test_export_times_out_cleanly(monkeypatch: pytest.MonkeyPatch, configu
             format="pdf",
             output_path=str(output_path),
             poll_interval_seconds=1,
-            max_wait_seconds=3,
+            max_wait_seconds=120,
         )
     )
 
@@ -425,6 +454,12 @@ async def test_export_times_out_cleanly(monkeypatch: pytest.MonkeyPatch, configu
     assert "job-timeout" in result
     assert "omni_get_dashboard_download_status" in result
     assert not output_path.exists()
+
+    # deadline = 0 + 120 = 120; the clock reports 50 then 100 (both < 120, one poll each) then
+    # 150 (>= 120, loop exits) — exactly 2 status polls, each with its clamped remaining budget.
+    assert len(fake.calls) == 3  # initiate + 2 status polls, no download attempted
+    assert fake.calls[1][2]["timeout"] == 70.0
+    assert fake.calls[2][2]["timeout"] == 20.0
 
 
 async def test_export_reports_job_error_status(
@@ -452,19 +487,12 @@ async def test_export_reports_job_error_status(
     assert not output_path.exists()
 
 
-async def test_export_refuses_overwrite_once_complete(
+async def test_export_refuses_overwrite_before_initiate(
     monkeypatch: pytest.MonkeyPatch, configured: None, tmp_path: Any
 ) -> None:
-    async def fake_sleep(seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(dashboards, "_sleep", fake_sleep)
-    fake = _FakeClient(
-        json_responses=[
-            {"job_id": "job-9", "message": "ok"},
-            {"job_id": "job-9", "status": "complete", "format": "pdf"},
-        ]
-    )
+    """The overwrite guard runs before the initiate POST, so no job is started (and no server
+    render is wasted) when the destination already exists and `overwrite` is false."""
+    fake = _FakeClient()
     monkeypatch.setattr("omni_mcp.tools.dashboards.get_client", lambda: fake)
     output_path = tmp_path / "export.pdf"
     output_path.write_bytes(b"existing")
@@ -475,6 +503,35 @@ async def test_export_refuses_overwrite_once_complete(
 
     assert "refusing to overwrite" in result
     assert output_path.read_bytes() == b"existing"
+    assert fake.calls == []  # no initiate, no poll, no download
+
+
+async def test_export_refuses_overwrite_detected_after_poll(
+    monkeypatch: pytest.MonkeyPatch, configured: None, tmp_path: Any
+) -> None:
+    """The post-poll re-check still catches a file that appears at `output_path` *during* the
+    wait (e.g. another process writing it), even though the pre-initiate guard found nothing."""
+    output_path = tmp_path / "export.pdf"
+
+    async def fake_sleep(seconds: float) -> None:
+        output_path.write_bytes(b"created during poll")
+
+    monkeypatch.setattr(dashboards, "_sleep", fake_sleep)
+    fake = _FakeClient(
+        json_responses=[
+            {"job_id": "job-9", "message": "ok"},
+            {"job_id": "job-9", "status": "in_progress", "format": "pdf"},
+            {"job_id": "job-9", "status": "complete", "format": "pdf"},
+        ]
+    )
+    monkeypatch.setattr("omni_mcp.tools.dashboards.get_client", lambda: fake)
+
+    result = await omni_export_dashboard_file(
+        ExportDashboardFileInput(dashboard_id="abc123", format="pdf", output_path=str(output_path))
+    )
+
+    assert "refusing to overwrite" in result
+    assert output_path.read_bytes() == b"created during poll"
 
 
 # ---------------------------------------------------------------------------
@@ -576,8 +633,12 @@ async def test_update_filters_success(monkeypatch: pytest.MonkeyPatch, configure
         )
     )
 
-    assert "Updated dashboard" in result
-    assert "1 filter(s)" in result
+    # Counts are read from the API's response body (FILTERS_PAYLOAD: 2 filters, 1 control, 3
+    # filterOrder entries), not echoed from the 1-filter request that was sent.
+    assert "Updated dashboard `abc123`" in result
+    assert "2 filter(s)" in result
+    assert "1 control(s)" in result
+    assert "3 filterOrder entry(ies)" in result
     assert fake.calls == [
         (
             "PATCH",
@@ -585,6 +646,24 @@ async def test_update_filters_success(monkeypatch: pytest.MonkeyPatch, configure
             {"params": None, "json_body": {"filters": {"order_status": {"values": ["shipped", "delivered"]}}}},
         )
     ]
+
+
+async def test_update_filters_counts_come_from_response_not_request(
+    monkeypatch: pytest.MonkeyPatch, configured: None
+) -> None:
+    """Regression guard: an (unrealistic but possible) empty/short response body must not be
+    padded out with the request's counts — the confirmation reports what the API actually has."""
+    fake = _FakeClient(payload={})
+    monkeypatch.setattr("omni_mcp.tools.dashboards.get_client", lambda: fake)
+
+    result = await omni_update_dashboard_filters(
+        UpdateDashboardFiltersInput(dashboard_id="abc123", filters={"a": {}, "b": {}, "c": {}})
+    )
+
+    assert "Updated dashboard `abc123`" in result
+    assert "0 filter(s)" in result
+    assert "0 control(s)" in result
+    assert "0 filterOrder entry(ies)" in result
 
 
 async def test_update_filters_clear_draft_and_controls(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:

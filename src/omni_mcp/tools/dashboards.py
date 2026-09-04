@@ -8,6 +8,7 @@ tools let a caller drive each step independently (e.g. to run several downloads 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -22,9 +23,17 @@ from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import ResponseFormat, iso_or_na, markdown_table, to_json, truncate_result
 from omni_mcp.server import mcp
 
+#: Download responses are binary (PDF/PNG/CSV/XLSX/ZIP) or single-tile JSON; without this the
+#: client's default `accept: application/json` header can make the API 406 a binary format.
+_BINARY_ACCEPT_HEADERS: dict[str, str] = {"accept": "*/*"}
+
 #: Injectable sleep for `omni_export_dashboard_file`'s polling loop — tests monkeypatch this
 #: module attribute so the polling loop does not actually wait.
 _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+#: Injectable monotonic clock for `omni_export_dashboard_file`'s poll deadline — tests
+#: monkeypatch this so a simulated clock can advance without a real wait.
+_monotonic: Callable[[], float] = time.monotonic
 
 
 def _dashboard_download_path(dashboard_id: str) -> str:
@@ -403,7 +412,7 @@ async def omni_initiate_dashboard_download(params: InitiateDashboardDownloadInpu
         body: dict[str, Any] = payload if isinstance(payload, dict) else {}
         job_id = body.get("job_id", "unknown")
         message = body.get("message", "Download initiated successfully")
-        return (
+        return truncate_result(
             f"Download job **initiated** for dashboard `{params.dashboard_id}` (format `{params.format}`). "
             f"Job ID: `{job_id}`. {message}. Poll `omni_get_dashboard_download_status` next."
         )
@@ -525,25 +534,29 @@ async def omni_download_dashboard_file(params: DownloadDashboardFileInput) -> st
     try:
         output_path = Path(params.output_path)
         if output_path.exists() and not params.overwrite:
-            return (
+            return truncate_result(
                 f"Error: refusing to overwrite existing file at `{output_path}` — pass `overwrite=true` to replace it."
             )
-        response = await get_client().request("GET", _dashboard_download_file_path(params.dashboard_id, params.job_id))
+        response = await get_client().request(
+            "GET",
+            _dashboard_download_file_path(params.dashboard_id, params.job_id),
+            headers=_BINARY_ACCEPT_HEADERS,
+        )
         if response.status_code == 202:
-            return (
+            return truncate_result(
                 "The download job is still in progress (202). Poll "
                 "`omni_get_dashboard_download_status` until status is `complete`, then retry."
             )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(response.content)
         content_type = response.headers.get("content-type", "application/octet-stream")
-        return (
+        return truncate_result(
             f"Downloaded dashboard file to `{output_path}` ({len(response.content):,} bytes, content-type "
             f"`{content_type}`)."
         )
     except Exception as exc:
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 410:
-            return (
+            return truncate_result(
                 "Error (410): the download job failed. Call `omni_get_dashboard_download_status` for the "
                 "failure detail, then re-initiate the download if needed."
             )
@@ -595,6 +608,12 @@ async def omni_export_dashboard_file(params: ExportDashboardFileInput) -> str:
     """
     job_id: str | None = None
     try:
+        output_path = Path(params.output_path)
+        if output_path.exists() and not params.overwrite:
+            return truncate_result(
+                f"Error: refusing to overwrite existing file at `{output_path}` — pass `overwrite=true` to replace it."
+            )
+
         query: dict[str, Any] = {}
         if params.user_id:
             query["userId"] = params.user_id
@@ -608,54 +627,58 @@ async def omni_export_dashboard_file(params: ExportDashboardFileInput) -> str:
         init_body: dict[str, Any] = init_payload if isinstance(init_payload, dict) else {}
         job_id = init_body.get("job_id")
         if not job_id:
-            return "Error: the API did not return a job id for the download request."
+            return truncate_result("Error: the API did not return a job id for the download request.")
 
         status = "in_progress"
-        elapsed = 0.0
-        while elapsed < params.max_wait_seconds:
-            status_payload = await client.request_json("GET", _dashboard_status_path(params.dashboard_id, job_id))
+        deadline = _monotonic() + params.max_wait_seconds
+        while (now := _monotonic()) < deadline:
+            remaining = max(0.0, deadline - now)
+            status_payload = await client.request_json(
+                "GET", _dashboard_status_path(params.dashboard_id, job_id), timeout=remaining
+            )
             status_body: dict[str, Any] = status_payload if isinstance(status_payload, dict) else {}
             status = status_body.get("status", "unknown")
             if status == "complete":
                 break
             if status == "error":
                 error_detail = status_body.get("error", "no detail provided")
-                return f"Error: download job `{job_id}` failed – {error_detail}."
+                return truncate_result(f"Error: download job `{job_id}` failed – {error_detail}.")
             await _sleep(params.poll_interval_seconds)
-            elapsed += params.poll_interval_seconds
 
         if status != "complete":
-            return (
+            return truncate_result(
                 f"Download job `{job_id}` is still `{status}` after waiting {params.max_wait_seconds:g}s. "
                 f"Resume with `omni_get_dashboard_download_status` (job_id=`{job_id}`) and "
                 "`omni_download_dashboard_file` once it reports `complete`."
             )
 
-        output_path = Path(params.output_path)
         if output_path.exists() and not params.overwrite:
-            return (
+            return truncate_result(
                 f"Error: refusing to overwrite existing file at `{output_path}` — pass `overwrite=true` to "
                 f"replace it. Download job `{job_id}` is complete and can still be fetched with "
                 "`omni_download_dashboard_file`."
             )
-        response = await client.request("GET", _dashboard_download_file_path(params.dashboard_id, job_id))
+        response = await client.request(
+            "GET", _dashboard_download_file_path(params.dashboard_id, job_id), headers=_BINARY_ACCEPT_HEADERS
+        )
         if response.status_code == 202:
-            return (
+            return truncate_result(
                 f"Download job `{job_id}` reported complete but the file was not yet ready (202); retry with "
                 "`omni_download_dashboard_file` shortly."
             )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(response.content)
         content_type = response.headers.get("content-type", "application/octet-stream")
-        return (
+        return truncate_result(
             f"Exported dashboard `{params.dashboard_id}` to `{output_path}` ({len(response.content):,} bytes, "
             f"content-type `{content_type}`). Job ID: `{job_id}`."
         )
     except Exception as exc:
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 410:
-            return (
-                f"Error (410): download job `{job_id}` failed. Call `omni_get_dashboard_download_status` for "
-                "the failure detail, then re-initiate the download if needed."
+            return truncate_result(
+                f"Error (410): download job `{job_id or 'unknown'}` failed. Call "
+                "`omni_get_dashboard_download_status` for the failure detail, then re-initiate the download "
+                "if needed."
             )
         return handle_api_error(exc)
 
@@ -801,7 +824,8 @@ async def omni_update_dashboard_filters(params: UpdateDashboardFiltersInput) -> 
 
     Returns:
     A short confirmation string naming the dashboard and how many filters, controls, and
-    filter-order entries were sent. On failure, an `Error ...` string.
+    filter-order entries are now configured, read from the API's updated configuration
+    response (not merely echoed from the request). On failure, an `Error ...` string.
 
     Examples:
     - Update filter values: `{"params": {"dashboard_id": "abc123", "filters": {"order_status": {"values": ["shipped", "delivered"]}}}}`
@@ -830,13 +854,20 @@ async def omni_update_dashboard_filters(params: UpdateDashboardFiltersInput) -> 
         if params.filter_order:
             body["filterOrder"] = params.filter_order
 
-        await get_client().request_json(
+        payload = await get_client().request_json(
             "PATCH", _dashboard_filters_path(params.dashboard_id), params=query or None, json_body=body
         )
-        return (
-            f"Updated dashboard `{params.dashboard_id}` filters/controls: {len(params.filters or {})} filter(s), "
-            f"{len(params.controls or {})} control(s), {len(params.filter_order or [])} filterOrder entry(ies) "
-            "sent."
+        response_body: dict[str, Any] = payload if isinstance(payload, dict) else {}
+        identifier = response_body.get("identifier", params.dashboard_id)
+        response_filters = response_body.get("filters")
+        filter_count = len(response_filters) if isinstance(response_filters, dict) else 0
+        response_controls = response_body.get("controls")
+        control_count = len(response_controls) if isinstance(response_controls, list) else 0
+        response_filter_order = response_body.get("filterOrder")
+        filter_order_count = len(response_filter_order) if isinstance(response_filter_order, list) else 0
+        return truncate_result(
+            f"Updated dashboard `{identifier}` filters/controls: {filter_count} filter(s), {control_count} "
+            f"control(s), {filter_order_count} filterOrder entry(ies) now configured."
         )
     except Exception as exc:
         return handle_api_error(exc)
