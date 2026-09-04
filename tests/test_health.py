@@ -149,6 +149,42 @@ async def test_api_info_without_configuration() -> None:
     assert "NOT configured (set OMNI_API_KEY)" in result
 
 
+@pytest.fixture
+def misconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed instance URL — `Settings()` itself raises for this one."""
+    monkeypatch.setenv("OMNI_BASE_URL", "acme.omniapp.co")
+    monkeypatch.setenv("OMNI_API_KEY", "secret-key")
+    get_settings.cache_clear()
+
+
+async def test_api_info_survives_an_invalid_base_url(misconfigured: None) -> None:
+    result = await omni_get_api_info(ApiInfoInput())
+
+    assert not result.startswith("Error")
+    assert "Invalid configuration" in result
+    # The rejected value is echoed back so the typo is visible…
+    assert "`acme.omniapp.co`" in result
+    assert "must start with http:// or https://" in result
+    # …and the tool still answers the rest of the question.
+    for module in TOOL_MODULES:
+        assert f"`{module}`" in result
+
+
+async def test_api_info_never_echoes_the_key_when_the_config_is_invalid(misconfigured: None) -> None:
+    result = await omni_get_api_info(ApiInfoInput())
+
+    assert "secret-key" not in result
+    assert "API key: configured" in result
+
+
+async def test_health_check_reports_an_invalid_base_url(misconfigured: None) -> None:
+    result = await omni_health_check(HealthCheckInput())
+
+    assert result.startswith("Error: invalid configuration – ")
+    assert "must start with http:// or https://" in result
+    assert "secret-key" not in result
+
+
 def test_inputs_reject_unknown_fields() -> None:
     with pytest.raises(ValueError):
         HealthCheckInput(unexpected="x")  # type: ignore[call-arg]

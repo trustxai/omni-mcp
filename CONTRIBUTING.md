@@ -225,6 +225,21 @@ not trigger `on: release` workflows from a release created with `GITHUB_TOKEN`.
 `.github/workflows/publish.yml` is a manual `workflow_dispatch` fallback that takes a tag. Do not
 bump the version or edit `CHANGELOG.md` by hand.
 
+### PyPI trusted publishers (two of them)
+
+PyPI matches a trusted publisher on the **workflow filename plus the environment**, not on the
+repository alone — so both workflows that can upload need their own entry. On pypi.org, under the
+`omni-mcp` project → *Manage* → *Publishing*, register these two GitHub publishers:
+
+| Owner | Repository | Workflow file | Environment |
+| --- | --- | --- | --- |
+| `trustxai` | `omni-mcp` | `release-please.yml` | `pypi` |
+| `trustxai` | `omni-mcp` | `publish.yml` | `pypi` |
+
+With only the first entry the normal release path works and the manual fallback fails at
+`uv publish` with an OIDC/"not a trusted publisher" error — at exactly the moment it is needed.
+Before the first release, add both as *pending* publishers (the project does not exist on PyPI yet).
+
 ## README tool table
 
 The `Tools` section of the README is generated:
@@ -233,4 +248,6 @@ The `Tools` section of the README is generated:
 uv run python scripts/tool_table.py
 ```
 
-Paste the output between the `<!-- TOOL_TABLE_START -->` and `<!-- TOOL_TABLE_END -->` markers.
+Paste the output between the `<!-- TOOL_TABLE_START -->` and `<!-- TOOL_TABLE_END -->` markers. The
+script exits non-zero (printing nothing) when a tool's registered `name=` does not match the
+function implementing it, since that tool could not be attributed to a module.

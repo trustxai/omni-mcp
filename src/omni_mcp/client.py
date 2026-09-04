@@ -56,8 +56,11 @@ class OmniClient:
     :meth:`request` is relative to the instance's API root, so tools pass
     `/v1/users`, `/v1/query/run`, `/scim/v2/Users`, … and never a full URL.
 
-    Retries: `429` honours `Retry-After` (capped at 30 s per wait) and
-    `502/503/504` back off 0.5 s → 1 s → 2 s. Other 4xx are never retried.
+    Retries: `429` honours `Retry-After` (capped at
+    :data:`MAX_RETRY_AFTER_SECONDS` = 60 s per wait) and `502/503/504` back off
+    0.5 s → 1 s → 2 s, all within a total sleep budget of
+    :data:`MAX_TOTAL_RETRY_WAIT_SECONDS` = 90 s per request — once the next wait
+    would cross it the response is surfaced instead. Other 4xx are never retried.
     After the last attempt the response is `raise_for_status()`-ed so tools
     route the failure through :func:`omni_mcp.errors.handle_api_error`.
     """

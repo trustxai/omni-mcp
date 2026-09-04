@@ -2,6 +2,11 @@ name: Publish to PyPI (manual)
 
 # Manual fallback only: the normal path is the `publish` job in
 # release-please.yml, which runs automatically when a release is created.
+#
+# PyPI binds a trusted publisher to a workflow *filename* plus environment, so
+# this file needs its own publisher entry (workflow `publish.yml`, environment
+# `pypi`) next to the `release-please.yml` one, or `uv publish` below fails to
+# exchange the OIDC token. See CONTRIBUTING.md → Commits and releases.
 on:
   workflow_dispatch:
     inputs:

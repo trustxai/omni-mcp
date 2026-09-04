@@ -5,6 +5,22 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
+
+
+def validation_error_detail(exc: ValidationError) -> str:
+    """One-line, human-readable summary of a pydantic validation failure.
+
+    `str(ValidationError)` spans several lines and ends with a docs URL, none of
+    which helps the caller. Only the first error's message is kept, without
+    pydantic's `Value error, ` prefix and collapsed onto a single line.
+    """
+    for error in exc.errors():
+        message = " ".join(str(error.get("msg", "")).split())
+        if not message:
+            continue
+        return message.removeprefix("Value error, ").removeprefix("Assertion failed, ")
+    return "no detail reported"
 
 
 def _body(response: httpx.Response) -> Any:
@@ -119,6 +135,10 @@ def handle_api_error(exc: Exception) -> str:
         return "Error: could not connect to the Omni API. Check network access and that OMNI_BASE_URL is correct."
     if isinstance(exc, httpx.HTTPError):
         return f"Error: HTTP transport failure – {type(exc).__name__}: {exc}"
+    if isinstance(exc, ValidationError):
+        # Raised by `Settings()` when an `OMNI_*` variable is malformed, so it
+        # reaches tools through `get_settings()` rather than the API.
+        return f"Error: invalid configuration – {validation_error_detail(exc)}"
     if isinstance(exc, RuntimeError):
         return f"Error: {exc}"
     return f"Error: unexpected failure – {type(exc).__name__}: {exc}"

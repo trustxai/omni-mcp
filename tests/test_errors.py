@@ -6,8 +6,19 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
-from omni_mcp.errors import handle_api_error
+from omni_mcp.config import Settings
+from omni_mcp.errors import handle_api_error, validation_error_detail
+
+
+def _settings_validation_error(base_url: str) -> ValidationError:
+    """The real `ValidationError` `Settings()` raises for a malformed URL."""
+    try:
+        Settings(omni_base_url=base_url)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError(f"Settings accepted {base_url!r}")
 
 
 def _status_error(
@@ -166,3 +177,22 @@ def test_unexpected_error_fallback() -> None:
     message = handle_api_error(ValueError("boom"))
 
     assert message == "Error: unexpected failure – ValueError: boom"
+
+
+def test_settings_validation_error_is_reported_as_invalid_configuration() -> None:
+    message = handle_api_error(_settings_validation_error("acme.omniapp.co"))
+
+    assert message.startswith("Error: invalid configuration – ")
+    assert "OMNI_BASE_URL must start with http:// or https://" in message
+    assert "acme.omniapp.co" in message
+    # None of pydantic's own noise: no multi-line report, no prefix, no docs URL.
+    assert "\n" not in message
+    assert "Value error" not in message
+    assert "errors.pydantic.dev" not in message
+    assert "unexpected failure" not in message
+
+
+def test_validation_error_detail_falls_back_when_pydantic_reports_no_message() -> None:
+    exc = ValidationError.from_exception_data("Settings", [])
+
+    assert validation_error_detail(exc) == "no detail reported"

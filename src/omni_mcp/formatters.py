@@ -17,6 +17,9 @@ from omni_mcp.config import get_settings
 
 TRUNCATION_NOTE = "[truncated: result exceeded {limit:,} bytes — narrow the request or page through it]"
 
+#: Fallback marker for budgets too small to hold `TRUNCATION_NOTE`.
+SHORT_TRUNCATION_NOTE = "[truncated]"
+
 
 class ResponseFormat(StrEnum):
     """Output format selector present on read tools."""
@@ -42,6 +45,10 @@ def truncate_result(text: str, limit: int | None = None) -> str:
     tool-result ceiling is a payload size — a character limit would let
     multi-byte text (accents, CJK, emoji) blow through it. The default comes
     from `OMNI_MAX_RESULT_CHARS`.
+
+    The limit always wins: when it is too small to hold the marker as well, the
+    marker degrades to `SHORT_TRUNCATION_NOTE` and then disappears, rather than
+    the return value overshooting the budget it exists to enforce.
     """
     effective = limit if limit is not None else get_settings().omni_max_result_chars
     if effective <= 0:
@@ -49,10 +56,12 @@ def truncate_result(text: str, limit: int | None = None) -> str:
     encoded = text.encode("utf-8")
     if len(encoded) <= effective:
         return text
-    note = "\n\n" + TRUNCATION_NOTE.format(limit=effective)
-    keep = max(0, effective - len(note.encode("utf-8")))
-    # `errors="ignore"` drops a code point split by the byte cut.
-    return encoded[:keep].decode("utf-8", errors="ignore") + note
+    for marker in ("\n\n" + TRUNCATION_NOTE.format(limit=effective), SHORT_TRUNCATION_NOTE):
+        room = effective - len(marker.encode("utf-8"))
+        if room >= 0:
+            # `errors="ignore"` drops a code point split by the byte cut.
+            return encoded[:room].decode("utf-8", errors="ignore") + marker
+    return encoded[:effective].decode("utf-8", errors="ignore")
 
 
 def iso_or_na(value: Any) -> str:
