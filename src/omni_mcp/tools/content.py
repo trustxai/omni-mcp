@@ -24,6 +24,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omni_mcp.client import get_client
+from omni_mcp.config import get_settings
 from omni_mcp.errors import handle_api_error
 from omni_mcp.formatters import (
     ResponseFormat,
@@ -242,11 +243,11 @@ class FindAndReplaceContentInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_field_scoping(self) -> FindAndReplaceContentInput:
-        if self.find_or_replace_type == "FIELD":
-            if "." not in self.find:
-                raise ValueError("Find field must be scoped by view name (e.g. view_name.field_name)")
-            if "." not in self.replacement:
-                raise ValueError("Replacement field must be scoped by view name (e.g. view_name.field_name)")
+        # Only the `find` side is a documented 400 ("Find field must be scoped by
+        # view name"); the API publishes no such rule for `replacement`, so that
+        # value is passed through rather than rejected locally.
+        if self.find_or_replace_type == "FIELD" and "." not in self.find:
+            raise ValueError("Find field must be scoped by view name (e.g. view_name.field_name)")
         return self
 
 
@@ -266,12 +267,21 @@ class ExportDashboardInput(BaseModel):
     )
     overwrite: bool = Field(
         default=False,
-        description="Allow `output_path` to replace an existing file. Without it an existing file is left untouched.",
+        description=(
+            "Allow `output_path` to replace an existing file. Without it an existing file is left untouched. "
+            "Only meaningful together with `output_path`."
+        ),
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
         description="`markdown` for a summary plus the export JSON, `json` for the raw export payload only.",
     )
+
+    @model_validator(mode="after")
+    def _check_overwrite(self) -> ExportDashboardInput:
+        if self.overwrite and not self.output_path:
+            raise ValueError("overwrite only applies together with output_path; nothing is written without it")
+        return self
 
 
 class ImportDashboardInput(BaseModel):
@@ -280,20 +290,20 @@ class ImportDashboardInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     base_model_id: str = Field(..., min_length=1, description="UUID of the target model to import the dashboard into.")
-    document: dict[str, Any] | None = Field(
+    export_payload: dict[str, Any] | None = Field(
         default=None,
         description=(
             "The full export payload from `omni_export_dashboard`, shaped "
             '`{"dashboard": {...}, "document": {...}, "workbookModel": {...}, "exportVersion": "0.1", '
             '"fileUploads": [{"fileUploadId", "fileName", "contentType", "data"}]}`. Provide exactly one of '
-            "`document` or `input_path`."
+            "`export_payload` or `input_path`."
         ),
     )
     input_path: str | None = Field(
         default=None,
         description=(
             "Local path of a JSON file holding the export payload (as written by `omni_export_dashboard`'s "
-            "`output_path`). Provide exactly one of `document` or `input_path`."
+            "`output_path`). Provide exactly one of `export_payload` or `input_path`."
         ),
     )
     identifier: str | None = Field(default=None, description="Custom identifier for the imported dashboard.")
@@ -301,8 +311,8 @@ class ImportDashboardInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_source(self) -> ImportDashboardInput:
-        if bool(self.document) == bool(self.input_path):
-            raise ValueError("Provide exactly one of 'document' or 'input_path'")
+        if bool(self.export_payload) == bool(self.input_path):
+            raise ValueError("Provide exactly one of 'export_payload' or 'input_path'")
         return self
 
 
@@ -785,8 +795,10 @@ async def omni_find_and_replace_content(params: FindAndReplaceContentInput) -> s
 @mcp.tool(
     name="omni_export_dashboard",
     annotations=ToolAnnotations(
+        # Not read-only: with `output_path` set the tool writes a local file.
+        # Still non-destructive — replacing an existing file needs `overwrite`.
         title="Export Dashboard",
-        readOnlyHint=True,
+        readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
@@ -866,10 +878,14 @@ async def omni_export_dashboard(params: ExportDashboardInput) -> str:
             "Pass `output_path` to write this payload to a file instead of returning it.",
             "",
             "```json",
-            serialized,
-            "```",
+            "",
         ]
-        return truncate_result("\n".join(lines))
+        header = "\n".join(lines)
+        closing = "\n```"
+        # The JSON is truncated on its own so the fence still closes — truncating
+        # the assembled string would cut the trailing ``` off a large export.
+        budget = get_settings().omni_max_result_chars - len(header.encode("utf-8")) - len(closing.encode("utf-8"))
+        return header + truncate_result(serialized, max(budget, 1)) + closing
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -893,7 +909,7 @@ async def omni_import_dashboard(params: ImportDashboardInput) -> str:
     so it is treated as destructive. Requires an Organization API key; Personal
     Access Tokens are not accepted.
 
-    Supply the export payload either inline as `document` or as `input_path`
+    Supply the export payload either inline as `export_payload` or as `input_path`
     pointing at the file `omni_export_dashboard` wrote — exactly one of the two.
     The payload must carry `dashboard`, `document`, `workbookModel`, and
     `exportVersion` (`"0.1"`); its `fileUploads` array is forwarded so
@@ -916,7 +932,7 @@ async def omni_import_dashboard(params: ImportDashboardInput) -> str:
     Examples:
     - From a file: `{"params": {"base_model_id": "550e8400-e29b-41d4-a716-446655440000", "input_path": "/tmp/revenue-dashboard.json"}}`
     - Into a folder with a custom identifier: `{"params": {"base_model_id": "550e8400-...", "input_path": "/tmp/revenue-dashboard.json", "folder_path": "/Finance/Reports", "identifier": "revenue-2026"}}`
-    - Inline payload: `{"params": {"base_model_id": "550e8400-...", "document": {"dashboard": {}, "document": {}, "workbookModel": {}, "exportVersion": "0.1"}}}`
+    - Inline payload: `{"params": {"base_model_id": "550e8400-...", "export_payload": {"dashboard": {}, "document": {}, "workbookModel": {}, "exportVersion": "0.1"}}}`
 
     Error Handling:
     400 means the payload is malformed or `exportVersion` is not `"0.1"` — always
@@ -928,17 +944,20 @@ async def omni_import_dashboard(params: ImportDashboardInput) -> str:
     before any request is sent.
     """
     try:
-        export: dict[str, Any] = params.document or {}
+        export: dict[str, Any] = params.export_payload or {}
         if params.input_path:
             loaded, error = _read_export_file(params.input_path)
             if error is not None:
                 return error
             export = loaded or {}
 
-        missing = [key for key in EXPORT_REQUIRED_KEYS if key not in export]
+        # A key present but null is as unusable as a missing one, and the API
+        # answers that with an opaque 400.
+        missing = [key for key in EXPORT_REQUIRED_KEYS if export.get(key) is None]
         if missing:
             return (
-                f"Error: the export payload is missing required key(s): {', '.join(missing)}. It must be the full "
+                f"Error: the export payload is missing required key(s), or has them set to null: "
+                f"{', '.join(missing)}. It must be the full "
                 "response from `omni_export_dashboard` (`dashboard`, `document`, `workbookModel`, `exportVersion`). "
                 "No request was sent."
             )
