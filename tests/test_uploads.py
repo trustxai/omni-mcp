@@ -454,3 +454,43 @@ async def test_delete_upload_error_path(monkeypatch: pytest.MonkeyPatch) -> None
 def test_delete_upload_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         DeleteUploadInput(upload_id="x", unexpected="x")  # type: ignore[call-arg]
+
+
+def test_list_uploads_input_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        ListUploadsInput(unexpected="x")  # type: ignore[call-arg]
+
+
+async def test_delete_upload_treats_an_empty_2xx_as_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 204/empty body is a successful delete, not an unconfirmed one."""
+    fake = _FakeClient(payload=None)
+    monkeypatch.setattr("omni_mcp.tools.uploads.get_client", lambda: fake)
+
+    result = await omni_delete_upload(DeleteUploadInput(upload_id="770e8400-e29b-41d4-a716-446655440002"))
+
+    assert result.startswith("Deleted upload")
+
+
+async def test_list_uploads_renders_model_id_and_created_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(
+        payload={
+            "records": [
+                {
+                    "id": "u1",
+                    "file_name": "users.csv",
+                    "view_name": "users",
+                    "model_id": "880e8400-e29b-41d4-a716-446655440003",
+                    "connection_id": "c1",
+                    "created_at": "2026-01-02T03:04:05.000Z",
+                    "updated_at": "2026-01-03T03:04:05.000Z",
+                }
+            ],
+            "pageInfo": {},
+        }
+    )
+    monkeypatch.setattr("omni_mcp.tools.uploads.get_client", lambda: fake)
+
+    result = await omni_list_uploads(ListUploadsInput())
+
+    assert "880e8400-e29b-41d4-a716-446655440003" in result
+    assert "created 2026-01-02" in result
