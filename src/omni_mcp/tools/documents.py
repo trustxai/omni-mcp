@@ -236,8 +236,15 @@ class MoveDocumentInput(BaseModel):
     folder_path: str | None = Field(
         default=None,
         description=(
-            "Path of the destination folder, for example `/reports/2026/q1`. Leave unset (null) to "
-            "move the document to the root level, outside any folder."
+            "Path of the destination folder, for example `/reports/2026/q1`. Provide exactly one of "
+            "`folder_path` or `to_root`."
+        ),
+    )
+    to_root: bool = Field(
+        default=False,
+        description=(
+            "Move the document out of every folder, to the root level. Say this explicitly — it is not "
+            "what an omitted `folder_path` means. Provide exactly one of `folder_path` or `to_root`."
         ),
     )
     scope: DocumentScope | None = Field(
@@ -248,6 +255,17 @@ class MoveDocumentInput(BaseModel):
             "or the destination folder. When provided, it must match the destination folder's scope."
         ),
     )
+
+    @model_validator(mode="after")
+    def _require_a_destination(self) -> MoveDocumentInput:
+        # Passing `scope` alone used to move the document to the root level as a
+        # side effect, which is never what the caller meant.
+        if bool(self.folder_path) == self.to_root:
+            raise ValueError(
+                "Provide exactly one of folder_path or to_root=true: a move with neither would send the "
+                "document to the root level."
+            )
+        return self
 
 
 class DuplicateDocumentInput(BaseModel):
@@ -687,8 +705,10 @@ async def omni_delete_document(params: DeleteDocumentInput) -> str:
 async def omni_move_document(params: MoveDocumentInput) -> str:
     """Move a document to another folder, or change its sharing scope.
 
-    Calls `PUT /v1/documents/{documentId}/move`. Leaving `folder_path` unset
-    moves the document to the root level, outside any folder.
+    Calls `PUT /v1/documents/{documentId}/move`. The destination is explicit:
+    either `folder_path`, or `to_root: true` to pull the document out of every
+    folder. Passing neither is rejected, so a scope change can never move a
+    document to the root level as a side effect.
 
     When to Use:
     - To file a document into a folder, or pull it back out to the root.
@@ -704,6 +724,7 @@ async def omni_move_document(params: MoveDocumentInput) -> str:
 
     Examples:
     - Into a folder: `{"params": {"document_id": "12db1a0a", "folder_path": "/reports/2026/q1"}}`
+    - Out of every folder: `{"params": {"document_id": "12db1a0a", "to_root": true}}`
     - To the root: `{"params": {"document_id": "12db1a0a"}}`
     - With a scope: `{"params": {"document_id": "12db1a0a", "folder_path": "/shared", "scope": "organization"}}`
 
@@ -717,7 +738,7 @@ async def omni_move_document(params: MoveDocumentInput) -> str:
     exist`.
     """
     try:
-        body: dict[str, Any] = {"folderPath": params.folder_path}
+        body: dict[str, Any] = {"folderPath": params.folder_path or None}
         if params.scope is not None:
             body["scope"] = params.scope
         await get_client().request_json("PUT", f"/v1/documents/{_path(params.document_id)}/move", json_body=body)
@@ -778,7 +799,9 @@ async def omni_duplicate_document(params: DuplicateDocumentInput) -> str:
     """
     try:
         body: dict[str, Any] = {"name": params.name}
-        if params.folder_path is not None:
+        # An empty (or whitespace-only) path is dropped rather than sent as
+        # `folderPath: ""`, which the API answers with a 404.
+        if params.folder_path:
             body["folderPath"] = params.folder_path
         if params.scope is not None:
             body["scope"] = params.scope
@@ -849,7 +872,7 @@ async def omni_upgrade_dashboard_layout(params: UpgradeDashboardLayoutInput) -> 
         if params.clear_existing_draft is not None:
             body["clearExistingDraft"] = params.clear_existing_draft
         payload = await get_client().request_json(
-            "POST", f"/v1/documents/{_path(params.document_id)}/upgrade", json_body=body
+            "POST", f"/v1/documents/{_path(params.document_id)}/upgrade", json_body=body or None
         )
         result = _record(payload)
         identifier = result.get("identifier", params.document_id)
@@ -965,7 +988,7 @@ async def omni_create_document_draft(params: CreateDocumentDraftInput) -> str:
         if params.branch_id:
             body["branchId"] = params.branch_id
         payload = await get_client().request_json(
-            "POST", f"/v1/documents/{_path(params.document_id)}/draft", json_body=body
+            "POST", f"/v1/documents/{_path(params.document_id)}/draft", json_body=body or None
         )
         result = _record(payload)
         branch_text = f" on branch `{params.branch_id}`" if params.branch_id else ""
@@ -1019,7 +1042,9 @@ async def omni_archive_document_draft(params: ArchiveDocumentDraftInput) -> str:
         body: dict[str, Any] = {}
         if params.branch_id:
             body["branchId"] = params.branch_id
-        await get_client().request_json("DELETE", f"/v1/documents/{_path(params.document_id)}/draft", json_body=body)
+        await get_client().request_json(
+            "DELETE", f"/v1/documents/{_path(params.document_id)}/draft", json_body=body or None
+        )
         branch_text = f" on branch `{params.branch_id}`" if params.branch_id else ""
         return f"Archived the draft of document `{params.document_id}`{branch_text} (retained for 30 days)."
     except Exception as exc:
