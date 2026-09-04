@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/trustxai/omni-mcp/compare/v0.2.1...v0.2.2) (2026-09-04)
+
+
+### Features
+
+* **config:** OMNI_TOOL_MODULES selects which tool modules register ([#29](https://github.com/trustxai/omni-mcp/issues/29)) ([75b50b8](https://github.com/trustxai/omni-mcp/commit/75b50b83439b5ad9dc7e0eebc9ad634b1b9af77a))
+
 ## [0.2.1](https://github.com/trustxai/omni-mcp/compare/v0.2.0...v0.2.1) (2026-09-04)
 
 
