@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from urllib.parse import quote
 
+import httpx
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +39,11 @@ MAX_SUMMARY_FIELDS = 40
 #: Injectable so the polling tests never actually wait. Tests monkeypatch
 #: `omni_mcp.tools.queries._sleep`; the call site reads this global each time.
 _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+#: Injectable wall clock. The wait budget must be measured against real time,
+#: not the time spent sleeping: `/v1/query/wait` is a server-side long poll, so
+#: a single request can burn the whole budget on its own.
+_monotonic: Callable[[], float] = time.monotonic
 
 
 # --- input models -----------------------------------------------------
@@ -141,7 +148,7 @@ class RunQueryInput(BaseModel):
     )
     result_type: Literal["csv", "json", "xlsx"] | None = Field(
         default=None,
-        description="Export format. **Cannot be combined with `plan_only`.** Leave unset (the default) to get the base64 Apache Arrow table this tool decodes into rows; setting it returns the raw export instead.",
+        description="Export format. **Cannot be combined with `plan_only`.** Leave unset (the default) to get the base64 Apache Arrow table this tool decodes into rows; setting it returns the raw csv/json/xlsx export verbatim, with no table, metadata, or SQL.",
     )
     plan_only: bool | None = Field(
         default=None,
@@ -153,7 +160,7 @@ class RunQueryInput(BaseModel):
     )
     workbook_url: bool | None = Field(
         default=None,
-        description="If `true`, create an ephemeral workbook reproducing the query and return its URL in the `X-Omni-Workbook-Url` response header (best-effort). **Cannot be combined with `plan_only`.**",
+        description="If `true`, create an ephemeral workbook reproducing the query; its URL is reported in the result metadata (best-effort — the API omits it silently if the user lacks the workbooks permission). **Cannot be combined with `plan_only`.**",
     )
 
     # --- transport / rendering ---
@@ -193,7 +200,7 @@ class WaitForQueryResultsInput(BaseModel):
         default=120.0,
         ge=1.0,
         le=900.0,
-        description="Total time to keep polling before giving up and returning the still-pending job IDs.",
+        description="Total wall-clock time to keep polling before giving up and returning the still-pending job IDs.",
     )
     poll_interval_seconds: float = Field(
         default=2.0,
@@ -205,7 +212,7 @@ class WaitForQueryResultsInput(BaseModel):
         default=120.0,
         ge=1.0,
         le=600.0,
-        description="How long a single poll request may take before giving up (seconds).",
+        description="How long a single poll request may take (seconds). Clamped to whatever is left of `max_wait_seconds`.",
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
@@ -249,6 +256,20 @@ def _is_true(value: Any) -> bool:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _decode_response(response: httpx.Response) -> Any:
+    """Decode a response body: JSON when it parses, else raw text, else `None`.
+
+    `omni_run_query` reads the response itself (rather than through
+    `request_json`) because the workbook URL only exists as a header.
+    """
+    if not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
 
 
 def _job_ids(body: dict[str, Any]) -> list[str]:
@@ -335,7 +356,7 @@ def _field_names(summary: dict[str, Any]) -> list[str]:
     return names
 
 
-def _metadata_lines(body: dict[str, Any]) -> list[str]:
+def _metadata_lines(body: dict[str, Any], *, workbook_url: str | None = None) -> list[str]:
     """Job / summary / cache metadata rendered above the result table."""
     summary = _mapping(body.get("summary"))
     lines: list[str] = []
@@ -352,10 +373,10 @@ def _metadata_lines(body: dict[str, Any]) -> list[str]:
         lines.append(f"- Rows reported by the API: {total_rows:,}")
     execution_time = summary.get("execution_time_ms")
     if isinstance(execution_time, int | float):
-        lines.append(f"- Execution time: {execution_time:,g} ms")
+        lines.append(f"- Execution time: {execution_time:,.0f} ms")
     server_stream = _mapping(body.get("stream_stats")).get("server_stream")
     if isinstance(server_stream, int | float):
-        lines.append(f"- Result streaming: {server_stream:,g} ms")
+        lines.append(f"- Result streaming: {server_stream:,.0f} ms")
 
     cache_metadata = _mapping(body.get("cache_metadata"))
     if cache_metadata:
@@ -370,6 +391,14 @@ def _metadata_lines(body: dict[str, Any]) -> list[str]:
         shown = names[:MAX_SUMMARY_FIELDS]
         suffix = "" if len(shown) == len(names) else f" _(+{len(names) - len(shown):,} more)_"
         lines.append(f"- Fields ({len(names):,}): " + ", ".join(f"`{name}`" for name in shown) + suffix)
+
+    # A run can return one job's rows while others are still going.
+    still_running = _job_ids(body)
+    if still_running:
+        listed = ", ".join(f"`{job_id}`" for job_id in still_running)
+        lines.append(f"- Still running: {listed} — poll them with `omni_wait_for_query_results`.")
+    if workbook_url:
+        lines.append(f"- Workbook: {workbook_url}")
     return lines
 
 
@@ -383,7 +412,14 @@ def _pending_message(job_ids: list[str], *, reason: str) -> str:
     )
 
 
-def _render_query_result(body: dict[str, Any], fmt: ResponseFormat, max_rows: int, *, title: str) -> str:
+def _render_query_result(
+    body: dict[str, Any],
+    fmt: ResponseFormat,
+    max_rows: int,
+    *,
+    title: str,
+    workbook_url: str | None = None,
+) -> str:
     """Render a run/wait response: metadata + SQL, then the decoded Arrow rows.
 
     Markdown goes through `format_arrow_result`; JSON keeps the same decoded
@@ -407,6 +443,7 @@ def _render_query_result(body: dict[str, Any], fmt: ResponseFormat, max_rows: in
                     "streamStats": _mapping(body.get("stream_stats")) or None,
                     "timedOut": _is_true(body.get("timed_out")),
                     "remainingJobIds": _job_ids(body),
+                    "workbookUrl": workbook_url,
                     "rowCount": len(rows),
                     "returnedRows": len(shown),
                     "truncated": len(shown) < len(rows),
@@ -416,7 +453,7 @@ def _render_query_result(body: dict[str, Any], fmt: ResponseFormat, max_rows: in
         )
 
     lines = [f"# {title}", ""]
-    lines.extend(_metadata_lines(body) or ["_No job metadata reported._"])
+    lines.extend(_metadata_lines(body, workbook_url=workbook_url) or ["_No job metadata reported._"])
     lines.extend(_sql_lines(summary))
     lines.append("")
     if result_b64:
@@ -465,9 +502,10 @@ async def omni_run_query(params: RunQueryInput) -> str:
 
     Returns:
     A markdown report — job ID and status, row count, execution time, cache and
-    field metadata, the generated SQL (fenced and truncated), then the result
-    table capped at `max_rows` — or the same metadata with decoded rows when
-    `response_format` is `json`. If the request soft-timed out, a message with
+    field metadata, any workbook URL and still-running job IDs, the generated SQL
+    (fenced and truncated), then the result table capped at `max_rows` — or the
+    same metadata with decoded rows when `response_format` is `json`. Setting
+    `result_type` returns the raw export instead. If the request soft-timed out, a message with
     the remaining job IDs and what to do next. On failure, an `Error ...` string.
 
     Examples:
@@ -496,23 +534,37 @@ async def omni_run_query(params: RunQueryInput) -> str:
             )
 
         query_params = {"userId": params.user_id} if params.user_id else None
-        payload = await get_client().request_json(
+        # The response, not just its body: `workbook_url` is delivered as a header.
+        response = await get_client().request(
             "POST",
             "/v1/query/run",
             params=query_params,
             json_body=_request_body(params),
             timeout=params.timeout_seconds,
         )
+        payload = _decode_response(response)
+        if payload is None:
+            return "_The API returned an empty response._"
+        if params.result_type is not None:
+            # An export was requested, so the body is csv/json/xlsx rather than the
+            # envelope with the base64 Arrow table. Branch on the request, not on
+            # the decoded type: a JSON export parses into a dict or a list.
+            return truncate_result(payload if isinstance(payload, str) else to_json(payload))
         if not isinstance(payload, dict):
-            # `result_type` was set, so the API returned a raw export instead of
-            # the JSON envelope with the base64 Arrow table.
-            return truncate_result(str(payload) if payload is not None else "_The API returned an empty response._")
+            return truncate_result(str(payload))
 
+        workbook_url = response.headers.get("x-omni-workbook-url")
         if not payload.get("result"):
             pending = _job_ids(payload)
             if pending or _is_true(payload.get("timed_out")):
                 return _pending_message(pending, reason="The request timed out before the query finished.")
-        return _render_query_result(payload, params.response_format, params.max_rows, title="Query results")
+        return _render_query_result(
+            payload,
+            params.response_format,
+            params.max_rows,
+            title="Query results",
+            workbook_url=workbook_url,
+        )
     except Exception as exc:
         return handle_api_error(exc)
 
@@ -532,8 +584,10 @@ async def omni_wait_for_query_results(params: WaitForQueryResultsInput) -> str:
 
     Calls `GET /v1/query/wait` with the job IDs (sent as a JSON array, exactly
     as the API expects) and keeps polling every `poll_interval_seconds` until
-    the response reports `timed_out: false` or `max_wait_seconds` of waiting has
-    been spent. Results are decoded from base64 Apache Arrow and rendered like
+    the response reports `timed_out: false` or `max_wait_seconds` of **wall
+    clock** time has passed. Each request is a server-side long poll, so its
+    timeout is clamped to whatever is left of that budget — the tool cannot
+    outstay it. Results are decoded from base64 Apache Arrow and rendered like
     `omni_run_query`'s.
 
     When to Use:
@@ -566,29 +620,33 @@ async def omni_wait_for_query_results(params: WaitForQueryResultsInput) -> str:
     try:
         client = get_client()
         pending = [job_id for job_id in params.job_ids if job_id]
-        waited = 0.0
-        body: dict[str, Any] = {}
+        start = _monotonic()
+        elapsed = 0.0
         while True:
+            remaining = params.max_wait_seconds - elapsed
             payload = await client.request_json(
                 "GET",
                 "/v1/query/wait",
                 params={"job_ids": json.dumps(pending)},
-                timeout=params.timeout_seconds,
+                # The endpoint long-polls server-side, so one request can consume
+                # the whole budget: never let it outlive what is left of it.
+                timeout=min(params.timeout_seconds, remaining) if remaining > 0 else params.timeout_seconds,
             )
             body = payload if isinstance(payload, dict) else {}
             if not _is_true(body.get("timed_out")):
                 return _render_query_result(body, params.response_format, params.max_rows, title="Query results")
             pending = _job_ids(body) or pending
-            if waited + params.poll_interval_seconds > params.max_wait_seconds:
+            elapsed = _monotonic() - start
+            if elapsed + params.poll_interval_seconds >= params.max_wait_seconds:
                 break
-            waited += params.poll_interval_seconds
             await _sleep(params.poll_interval_seconds)
+            elapsed = _monotonic() - start
 
         return _pending_message(
             pending,
             reason=(
-                f"Still running after {waited:g}s of polling "
-                f"(budget {params.max_wait_seconds:g}s, interval {params.poll_interval_seconds:g}s)."
+                f"Still running after {elapsed:,.0f}s of the {params.max_wait_seconds:,.0f}s budget "
+                f"(poll interval {params.poll_interval_seconds:g}s)."
             ),
         )
     except Exception as exc:

@@ -23,13 +23,29 @@ from omni_mcp.tools.queries import (
 
 JOB_A = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 JOB_B = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+WORKBOOK_URL = "https://myorg.omniapp.co/e/1:abc123DEF456/1"
+
+
+class _Clock:
+    """A fake monotonic clock the tests advance by hand."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class _FakeClient:
     """Records `(method, path, kwargs)` calls; returns canned payload(s).
 
     `payloads` feeds one payload per call and repeats the last one, which is
-    what the polling tool needs.
+    what the polling tool needs. With a `clock`, each request advances it by
+    `seconds_per_call` capped at the timeout the caller asked for — the way a
+    server-side long poll behaves.
     """
 
     def __init__(
@@ -37,19 +53,52 @@ class _FakeClient:
         payload: Any = None,
         exc: Exception | None = None,
         payloads: list[Any] | None = None,
+        headers: dict[str, str] | None = None,
+        clock: _Clock | None = None,
+        seconds_per_call: float = 0.0,
     ) -> None:
         self._payload = payload if payload is not None else {}
         self._payloads = list(payloads) if payloads is not None else None
         self._exc = exc
+        self._headers = headers or {}
+        self._clock = clock
+        self._seconds_per_call = seconds_per_call
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
-    async def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
+    def _record(self, method: str, path: str, kwargs: dict[str, Any]) -> Any:
         self.calls.append((method, path, kwargs))
+        if self._clock is not None and self._seconds_per_call:
+            timeout = kwargs.get("timeout")
+            spent = min(self._seconds_per_call, timeout) if isinstance(timeout, int | float) else self._seconds_per_call
+            self._clock.advance(spent)
         if self._exc is not None:
             raise self._exc
         if self._payloads is not None:
             return self._payloads[min(len(self.calls) - 1, len(self._payloads) - 1)]
         return self._payload
+
+    async def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
+        return self._record(method, path, kwargs)
+
+    async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        payload = self._record(method, path, kwargs)
+        request = httpx.Request(method, f"https://acme.omniapp.co/api{path.lstrip('/')}")
+        if isinstance(payload, str):
+            return httpx.Response(200, text=payload, headers=self._headers, request=request)
+        return httpx.Response(200, json=payload, headers=self._headers, request=request)
+
+
+def _patch_polling(monkeypatch: pytest.MonkeyPatch, clock: _Clock) -> list[float]:
+    """Install the fake clock and a sleep that records and advances it."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    monkeypatch.setattr("omni_mcp.tools.queries._monotonic", clock)
+    monkeypatch.setattr("omni_mcp.tools.queries._sleep", _record)
+    return slept
 
 
 def _sample_table() -> pa.Table:
@@ -62,7 +111,7 @@ def _sample_table() -> pa.Table:
 
 
 def _stream_b64(table: pa.Table) -> str:
-    """Arrow table → IPC stream bytes → base64, exactly as the API sends it."""
+    """Arrow table -> IPC stream bytes -> base64, exactly as the API sends it."""
     sink = BytesIO()
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
@@ -157,6 +206,21 @@ async def test_run_query_sends_body_and_renders_rows(monkeypatch: pytest.MonkeyP
     assert "| id | name |" in result
     assert "| 1 | alpha |" in result
     assert "| 2 | beta |" in result
+
+
+async def test_run_query_formats_large_numbers_without_exponents(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _result_payload(
+        summary={"total_rows": 1_234_567, "execution_time_ms": 1_234_567},
+        stream_stats={"server_stream": 9_876_543},
+    )
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=payload))
+
+    result = await omni_run_query(_fields_input())
+
+    assert "- Rows reported by the API: 1,234,567" in result
+    assert "- Execution time: 1,234,567 ms" in result
+    assert "- Result streaming: 9,876,543 ms" in result
+    assert "e+" not in result
 
 
 async def test_run_query_raw_query_wins_over_first_class_fields(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,6 +371,27 @@ async def test_run_query_soft_timeout_returns_remaining_job_ids(monkeypatch: pyt
     assert "omni_wait_for_query_results" in result
 
 
+async def test_run_query_reports_jobs_still_running_beside_the_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run can return one job's rows while other jobs are still going."""
+    payload = _result_payload(remaining_job_ids=[JOB_B])
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=payload))
+
+    result = await omni_run_query(_fields_input())
+    markdown_line = f"- Still running: `{JOB_B}` — poll them with `omni_wait_for_query_results`."
+
+    assert markdown_line in result
+    assert "| 1 | alpha |" in result
+
+
+async def test_run_query_json_reports_jobs_still_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _result_payload(remaining_job_ids=[JOB_B])
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=payload))
+
+    body = json.loads(await omni_run_query(_fields_input(response_format=ResponseFormat.JSON)))
+
+    assert body["remainingJobIds"] == [JOB_B]
+
+
 async def test_run_query_plan_only_renders_sql_without_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = _result_payload(status="PLANNED", result=None)
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=payload))
@@ -327,12 +412,62 @@ async def test_run_query_truncates_a_huge_sql_block(monkeypatch: pytest.MonkeyPa
     assert "SQL truncated at 2,000 characters" in result
 
 
-async def test_run_query_returns_raw_export_when_result_type_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_query_surfaces_the_workbook_url_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeClient(payload=_result_payload(), headers={"X-Omni-Workbook-Url": WORKBOOK_URL})
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
+
+    result = await omni_run_query(_fields_input(workbook_url=True))
+    body = json.loads(await omni_run_query(_fields_input(workbook_url=True, response_format=ResponseFormat.JSON)))
+
+    assert fake.calls[0][2]["json_body"]["workbookUrl"] is True
+    assert f"- Workbook: {WORKBOOK_URL}" in result
+    assert body["workbookUrl"] == WORKBOOK_URL
+
+
+async def test_run_query_without_the_workbook_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=_result_payload()))
+
+    result = await omni_run_query(_fields_input(workbook_url=True))
+
+    assert "- Workbook:" not in result
+
+
+async def test_run_query_csv_export_is_returned_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload="id,name\n1,alpha\n"))
 
     result = await omni_run_query(_fields_input(result_type="csv"))
 
     assert result == "id,name\n1,alpha\n"
+
+
+async def test_run_query_json_export_object_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `json` export parses into a dict — it must not reach the Arrow renderer."""
+    export = {"rows": [{"id": 1, "name": "alpha"}], "meta": {"total": 1}}
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=export))
+
+    result = await omni_run_query(_fields_input(result_type="json"))
+
+    assert json.loads(result) == export
+    assert "no result table" not in result
+
+
+async def test_run_query_json_export_array_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """...and a list export must not be rendered through Python's `repr`."""
+    export = [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=export))
+
+    result = await omni_run_query(_fields_input(result_type="json"))
+
+    assert json.loads(result) == export
+    assert "'id'" not in result
+
+
+async def test_run_query_empty_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=""))
+
+    result = await omni_run_query(_fields_input())
+
+    assert result == "_The API returned an empty response._"
 
 
 async def test_run_query_408_surfaces_remaining_job_ids(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -372,19 +507,15 @@ async def test_wait_polls_until_the_jobs_finish(monkeypatch: pytest.MonkeyPatch)
         ]
     )
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
-    slept: list[float] = []
-
-    async def _record(seconds: float) -> None:
-        slept.append(seconds)
-
-    monkeypatch.setattr("omni_mcp.tools.queries._sleep", _record)
+    slept = _patch_polling(monkeypatch, _Clock())
 
     result = await omni_wait_for_query_results(WaitForQueryResultsInput(job_ids=[JOB_A, JOB_B]))
 
     assert slept == [2.0, 2.0]
     assert [call[:2] for call in fake.calls] == [("GET", "/v1/query/wait")] * 3
     assert fake.calls[0][2] == {"params": {"job_ids": json.dumps([JOB_A, JOB_B])}, "timeout": 120.0}
-    # The second and third polls carry only the jobs the API still reports.
+    # The first response still listed both jobs, so poll two repeats them; only
+    # poll three narrows to the single job the second response left pending.
     assert fake.calls[1][2]["params"] == {"job_ids": json.dumps([JOB_A, JOB_B])}
     assert fake.calls[2][2]["params"] == {"job_ids": json.dumps([JOB_B])}
     assert "**2** row(s) returned." in result
@@ -394,12 +525,7 @@ async def test_wait_polls_until_the_jobs_finish(monkeypatch: pytest.MonkeyPatch)
 async def test_wait_uses_the_configured_poll_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(payloads=[{"timed_out": True, "remaining_job_ids": [JOB_A]}, _result_payload()])
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
-    slept: list[float] = []
-
-    async def _record(seconds: float) -> None:
-        slept.append(seconds)
-
-    monkeypatch.setattr("omni_mcp.tools.queries._sleep", _record)
+    slept = _patch_polling(monkeypatch, _Clock())
 
     await omni_wait_for_query_results(
         WaitForQueryResultsInput(job_ids=[JOB_A], poll_interval_seconds=5, timeout_seconds=30)
@@ -409,15 +535,34 @@ async def test_wait_uses_the_configured_poll_interval(monkeypatch: pytest.Monkey
     assert fake.calls[0][2]["timeout"] == 30.0
 
 
+async def test_wait_clamps_each_request_to_the_remaining_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow long poll burns the budget even though the tool barely sleeps."""
+    clock = _Clock()
+    fake = _FakeClient(
+        payload={"timed_out": True, "remaining_job_ids": [JOB_A]},
+        clock=clock,
+        seconds_per_call=50.0,
+    )
+    monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
+    slept = _patch_polling(monkeypatch, clock)
+
+    result = await omni_wait_for_query_results(WaitForQueryResultsInput(job_ids=[JOB_A]))
+
+    # 50s per request + 2s sleeps: three polls exhaust the 120s budget, and each
+    # request's timeout is cut down to what is left of it.
+    assert [call[2]["timeout"] for call in fake.calls] == [120.0, 68.0, 16.0]
+    assert len(fake.calls) == 3
+    assert slept == [2.0, 2.0]
+    assert clock.now <= 120.0
+    assert "Still running after 120s of the 120s budget" in result
+    assert JOB_A in result
+
+
 async def test_wait_gives_up_at_max_wait_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(payload={"timed_out": True, "remaining_job_ids": [JOB_A]})
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
-    slept: list[float] = []
-
-    async def _record(seconds: float) -> None:
-        slept.append(seconds)
-
-    monkeypatch.setattr("omni_mcp.tools.queries._sleep", _record)
+    clock = _Clock()
+    slept = _patch_polling(monkeypatch, clock)
 
     result = await omni_wait_for_query_results(
         WaitForQueryResultsInput(job_ids=[JOB_A], max_wait_seconds=5, poll_interval_seconds=2)
@@ -425,13 +570,15 @@ async def test_wait_gives_up_at_max_wait_seconds(monkeypatch: pytest.MonkeyPatch
 
     assert slept == [2.0, 2.0]
     assert len(fake.calls) == 3
+    assert [call[2]["timeout"] for call in fake.calls] == [5.0, 3.0, 1.0]
     assert "# Query still running" in result
     assert JOB_A in result
-    assert "Still running after 4s of polling" in result
+    assert "Still running after 4s of the 5s budget" in result
 
 
 async def test_wait_json_format(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: _FakeClient(payload=_result_payload()))
+    _patch_polling(monkeypatch, _Clock())
 
     payload = json.loads(
         await omni_wait_for_query_results(
@@ -448,6 +595,7 @@ async def test_wait_handles_a_string_timed_out_flag(monkeypatch: pytest.MonkeyPa
     """`timed_out` is typed as a string on the run endpoint: `"false"` is done."""
     fake = _FakeClient(payload=_result_payload(timed_out="false"))
     monkeypatch.setattr("omni_mcp.tools.queries.get_client", lambda: fake)
+    _patch_polling(monkeypatch, _Clock())
 
     result = await omni_wait_for_query_results(WaitForQueryResultsInput(job_ids=[JOB_A]))
 
