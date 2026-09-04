@@ -58,6 +58,9 @@ def _format_folder_line(folder: Mapping[str, Any]) -> str:
     count = folder.get("_count")
     if isinstance(count, dict):
         line += f", docs: {count.get('documents', '?')}, favorites: {count.get('favorites', '?')}"
+    url = folder.get("url")
+    if url:
+        line += f", url: {url}"
     return line
 
 
@@ -128,7 +131,12 @@ class ListFoldersInput(BaseModel):
     )
     sort_direction: SortDirection | None = Field(default=None, description="Sort direction. Defaults to `desc`.")
     cursor: str | None = Field(default=None, description="Cursor from a previous page, for pagination positioning.")
-    page_size: int = Field(default=20, ge=1, le=100, description="Records per page (minimum 1).")
+    page_size: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Records per page. The spec documents a minimum of 1; this server also caps it at 100.",
+    )
     owner_id: str | None = Field(
         default=None,
         description="UUID of an organization membership to scope results to. Required when `scope=restricted` "
@@ -331,7 +339,7 @@ async def omni_create_folder(params: CreateFolderInput) -> str:
         result: dict[str, Any] = payload if isinstance(payload, dict) else {}
         return (
             f"Created folder **{result.get('name', params.name)}** (id `{result.get('id')}`) "
-            f"at path `{result.get('path')}` — scope **{result.get('scope', 'organization')}**."
+            f"at path `{result.get('path')}` — scope **{result.get('scope') or 'unknown'}**."
         )
     except Exception as exc:
         return handle_api_error(exc)
@@ -659,8 +667,13 @@ async def omni_grant_folder_permissions(params: GrantFolderPermissionsInput) -> 
         body.update(
             _non_none(accessBoost=params.access_boost, userIds=params.user_ids, userGroupIds=params.user_group_ids)
         )
-        await get_client().request_json("POST", _folder_path(params.folder_id, "permissions"), json_body=body)
+        payload = await get_client().request_json("POST", _folder_path(params.folder_id, "permissions"), json_body=body)
         targets = _targets_description(params.user_ids, params.user_group_ids)
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return (
+                f"Grant **{params.role}** on folder `{params.folder_id}` for {targets} reported no success "
+                "in the response body."
+            )
         return f"Granted **{params.role}** on folder `{params.folder_id}` to {targets}."
     except Exception as exc:
         return handle_api_error(exc)
@@ -705,8 +718,15 @@ async def omni_update_folder_permissions(params: UpdateFolderPermissionsInput) -
         body.update(
             _non_none(accessBoost=params.access_boost, userIds=params.user_ids, userGroupIds=params.user_group_ids)
         )
-        await get_client().request_json("PATCH", _folder_path(params.folder_id, "permissions"), json_body=body)
+        payload = await get_client().request_json(
+            "PATCH", _folder_path(params.folder_id, "permissions"), json_body=body
+        )
         targets = _targets_description(params.user_ids, params.user_group_ids)
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return (
+                f"Update of permissions on folder `{params.folder_id}` for {targets} reported no success "
+                "in the response body."
+            )
         return f"Updated permissions on folder `{params.folder_id}` to **{params.role}** for {targets}."
     except Exception as exc:
         return handle_api_error(exc)
@@ -813,8 +833,15 @@ async def omni_revoke_folder_permissions(params: RevokeFolderPermissionsInput) -
     """
     try:
         body = _non_none(userIds=params.user_ids, userGroupIds=params.user_group_ids)
-        await get_client().request_json("DELETE", _folder_path(params.folder_id, "permissions"), json_body=body)
+        payload = await get_client().request_json(
+            "DELETE", _folder_path(params.folder_id, "permissions"), json_body=body
+        )
         targets = _targets_description(params.user_ids, params.user_group_ids)
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return (
+                f"Revocation of permissions on folder `{params.folder_id}` for {targets} reported no success "
+                "in the response body."
+            )
         return f"Revoked permissions on folder `{params.folder_id}` from {targets}."
     except Exception as exc:
         return handle_api_error(exc)

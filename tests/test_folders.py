@@ -838,3 +838,62 @@ def test_inputs_reject_unknown_fields() -> None:
         DeleteFolderInput(folder_id="folder-1", unexpected="x")  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
         CreateLabelInput(name="Dev", unexpected="x")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups
+# ---------------------------------------------------------------------------
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeClient) -> _FakeClient:
+    monkeypatch.setattr("omni_mcp.tools.folders.get_client", lambda: fake)
+    return fake
+
+
+async def test_folder_permission_writes_report_an_unsuccessful_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`{"success": false}` is a 200 answer that means the write did not happen."""
+    _install(monkeypatch, _FakeClient(payload={"success": False}))
+
+    granted = await omni_grant_folder_permissions(
+        GrantFolderPermissionsInput(folder_id="f1", role="VIEWER", user_ids=["u1"])
+    )
+    updated = await omni_update_folder_permissions(
+        UpdateFolderPermissionsInput(folder_id="f1", role="EDITOR", user_ids=["u1"])
+    )
+    revoked = await omni_revoke_folder_permissions(RevokeFolderPermissionsInput(folder_id="f1", user_ids=["u1"]))
+
+    for result in (granted, updated, revoked):
+        assert "reported no success" in result
+
+
+async def test_create_folder_does_not_invent_an_organization_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An API response without `scope` is unknown, not organization-wide."""
+    _install(monkeypatch, _FakeClient(payload={"id": "f1", "name": "My Reports", "path": "/my-reports"}))
+
+    result = await omni_create_folder(CreateFolderInput(name="My Reports"))
+
+    assert "scope **unknown**" in result
+
+
+async def test_list_folders_renders_the_folder_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(
+        monkeypatch,
+        _FakeClient(
+            payload={
+                "records": [
+                    {
+                        "id": "f1",
+                        "name": "Reports",
+                        "path": "/reports",
+                        "scope": "organization",
+                        "url": "https://acme.omniapp.co/folders/f1",
+                    }
+                ],
+                "pageInfo": {},
+            }
+        ),
+    )
+
+    result = await omni_list_folders(ListFoldersInput())
+
+    assert "https://acme.omniapp.co/folders/f1" in result
